@@ -30,7 +30,7 @@ metadata:
 | 发布时间 | 日期 | 毫秒级时间戳 |
 | 标签 | 多选 | 2-4个，由 LLM 提取 |
 | 标签说明 | 文本 | LLM 理由说明 |
-| 标签频次 | 文本 | LLM 标签词在正文中的关键词出现频次，由 `parse_llm_response(raw, content)` 自动计算 |
+| 标签频次 | 文本 | 空（LLM 方案不计算频次） |
 | 链接 | 文本 | ZSXQ 分享链接 |
 
 **app_token**: `XpGMbvYwsaNvZMsBzZ3cN1DRnOc`
@@ -69,31 +69,6 @@ python3 engine.py "https://t.zsxq.com/6L4Ry"
 
 ---
 
-### 阶段一附：AI破局俱乐部 分享链接获取
-
-**多维表格**：`AI破局俱乐部·精选内容库`（app_token: `XpGMbvYwsaNvZMsBzZ3cN1DRnOc`）
-
-**方式A — 有 topic_id（推荐）**
-
-```python
-from extractor_share import extract_share_url
-# group_id 15552545485212 = AI破局俱乐部
-result = extract_share_url("45544844845444248", group_id="15552545485212")
-# 返回 {"share_url": "https://t.zsxq.com/xxxx", "topic_id": "...", "title": "..."}
-```
-
-**方式B — 有分享链接，完整提取（含飞书链接）**
-
-```python
-from extractor_share import extract_full
-result = extract_full("https://t.zsxq.com/XXXX")
-# 返回 share_url + topic_id + 标题 + 作者 + 时间 + feishu_links
-```
-
-**获取 topic_id**：ZSXQ 星球页 → Chrome DevTools → Network → 找 `/topics/` API 响应，约17位数字
-
----
-
 ### 阶段二：读取飞书文档
 
 Agent 调用 `feishu_doc` 读取正文（截取前4000字传给 tagger）：
@@ -111,13 +86,11 @@ Agent 用 `tagger.py` 的 `build_llm_prompt()` 生成提示词，直接用自己
 from tagger import build_llm_prompt, parse_llm_response, format_record_tags
 
 llm_prompt = build_llm_prompt(feishu_content, title)
-# Agent 将提示词发给 LLM（当前 Agent 本身就是 LLM，直接回答）
-# 解析 LLM 回复，同时自动计算标签频次
-tag_result = parse_llm_response(llm_response, feishu_content)
-# tag_result: {"tags": [...], "tag_desc": "...", "tag_freq": "写作3次、智能体1次"}
+# Agent 将提示词发给自己（LLM）提取标签
+# 解析 LLM 回复
+tag_result = parse_llm_response(llm_response)
+# tag_result: {"tags": [...], "tag_desc": "...", "tag_freq": ""}
 ```
-
-**标签频次计算**：`_build_tag_freq()` 对每个标签扩展匹配关键词（如"写作"→"写作/文章/文案/创作/..."），统计正文中出现次数。
 
 参考标签（可直接使用）：`写作、提示词、智能体、获客、自媒体、AI研究、编程开发、效率工具、学习教育`
 
@@ -139,7 +112,7 @@ feishu_bitable_create_record(
         "发布时间": 1776256080000,          # 毫秒级时间戳
         "标签": ["写作", "智能体"],
         "标签说明": "标签1 / 标签2 理由说明",
-        "标签频次": "写作3次、智能体1次",
+        "标签频次": "",
         "链接": "https://t.zsxq.com/XXXX"
     }
 )
