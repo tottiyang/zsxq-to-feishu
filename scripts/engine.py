@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 ZSXQ 精选内容拉取引擎
-将 ZSXQ 分享链接 → 结构化数据 → 写入飞书多维表格
+ZSXQ 分享链接 → 结构化数据 → 写入飞书多维表格
 
 完整流程:
-  ① Playwright 提取 ZSXQ 分享链接数据（飞书链接 + 元数据）
-  ② feishu_doc 读取飞书文档正文
-  ③ tagger 智能分析内容标签
-  ④ feishu_bitable 创建/更新多维表格记录
-
-与文档《ZSXQ精选内容拉取工具·完整说明文档》保持同步
-文档: https://my.feishu.cn/wiki/Kjd1wsLXGic9iTkmETBcwKEjnOh
+  ① extract_zsxq_share() 提取 ZSXQ 元数据（飞书链接 + topic_id + 作者 + 时间）
+  ② Agent 调用 feishu_doc 读取飞书文档正文
+  ③ Agent 用 tagger.build_llm_prompt() 生成标签提取提示词，调用 LLM 提取标签
+  ④ Agent 将标签填入 record_fields，调用 feishu_bitable_create_record 写入
 
 使用方式:
   python3 engine.py "https://t.zsxq.com/6L4Ry"
@@ -18,8 +15,8 @@ ZSXQ 精选内容拉取引擎
 
 import sys
 import json
+import textwrap
 
-# 导入本地模块
 from config import (
     BITABLE_APP_TOKEN,
     BITABLE_TABLE_ID,
@@ -35,35 +32,43 @@ from config import (
     str_to_ms,
 )
 from extractor import extract_zsxq_share, extract_feishu_token
-from tagger import extract_tags, format_record_tags
+from tagger import build_llm_prompt, parse_llm_response, format_record_tags
 
+
+# ============================================================
+# 阶段一：提取元数据
+# ============================================================
 
 def run(share_url: str) -> dict:
     """
-    主流程：处理单个 ZSXQ 分享链接
-
-    参数:
-        share_url: ZSXQ 分享链接，如 https://t.zsxq.com/6L4Ry
+    提取 ZSXQ 分享链接的元数据
 
     返回:
-        {"success": True, "record_id": "...", "title": "...", "tags": [...]}
-        或 {"success": False, "error": "..."}
+        success=True 时返回:
+        {
+          "success": True,
+          "step": "meta_extracted",
+          "feishu_token": "...",
+          "feishu_link": "...",
+          "title": "...",
+          "author": "...",
+          "date_str": "...",
+          "zsxq_url": "...",
+          "zsxq_topic_id": "...",
+          "next_step": "read_feishu_doc",
+          "instruction": "请调用 feishu_doc...",
+        }
     """
-    # ── 步骤1：提取 ZSXQ 元数据 ────────────────────────
     print(f"[步骤1] 提取 ZSXQ 元数据: {share_url}")
     meta = extract_zsxq_share(share_url)
     if not meta.get("success"):
         return {"success": False, "error": f"[步骤1失败] {meta.get('error')}"}
 
-    feishu_link = meta.get("feishu_link")
+    feishu_link = meta.get("feishu_link", "")
     title = meta.get("title") or meta.get("zsxq_url", "未知标题")
     author = meta.get("author") or "未知作者"
     date_str = meta.get("date_str")
     zsxq_url = meta.get("zsxq_url") or share_url
-
-    if not feishu_link:
-        return {"success": False, "error": "[步骤1失败] 未找到飞书文档链接"}
-
     feishu_token = extract_feishu_token(feishu_link)
     zsxq_topic_id = meta.get("zsxq_topic_id") or feishu_token
 
@@ -71,10 +76,6 @@ def run(share_url: str) -> dict:
     print(f"  ✅ 作者: {author}")
     print(f"  ✅ 时间: {date_str}")
     print(f"  ✅ 飞书链接: {feishu_link}")
-
-    # ── 步骤2：读取飞书文档正文（需要 Agent 调用 feishu_doc）─────
-    # 注意：这里只返回元数据，实际读取由 Agent 调用 feishu_doc 完成
-    # Agent 需要先读取文档，再调用本引擎的 process_content 方法
 
     return {
         "success": True,
@@ -89,10 +90,14 @@ def run(share_url: str) -> dict:
         "next_step": "read_feishu_doc",
         "instruction": (
             f"请调用 feishu_doc(action='read', doc_token='{feishu_token}') "
-            "获取文档正文，然后调用 process_content() 处理内容并写入多维表格"
+            "获取文档正文。"
         ),
     }
 
+
+# ============================================================
+# 阶段二：提取标签（Agent 调用 LLM）
+# ============================================================
 
 def process_content(
     feishu_token: str,
@@ -105,85 +110,78 @@ def process_content(
     feishu_content: str,
 ) -> dict:
     """
-    步骤2-4：处理飞书文档内容，提取标签，写入多维表格
+    构建多维表格记录字段
+
+    流程：
+    1. Agent 调用 feishu_doc 读取正文
+    2. Agent 用下方 instruction 调用 LLM 提取标签
+    3. Agent 填入 tags 后，调用 feishu_bitable_create_record 写入
 
     参数:
-        feishu_token: 飞书文档 token
-        feishu_link: 飞书文档链接
-        title: 话题标题
-        author: 作者
-        date_str: 发布时间 "YYYY-MM-DD HH:mm"
-        zsxq_url: ZSXQ 分享链接
-        zsxq_topic_id: ZSXQ topic_id，约17位数字，如 45544844845444248
-        feishu_content: 飞书文档正文（纯文本）
+        feishu_content: feishu_doc 读取的文档正文（纯文本）
 
     返回:
-        {"success": True, "record_id": "...", "title": "...", "tags": [...]}
+        llm_needed=True 时返回 LLM 提示词，等 Agent 填入标签后完成
     """
-    # ── 步骤2：提取标签 ──────────────────────────────
-    print(f"\n[步骤2] 提取内容标签")
-    tag_result = extract_tags(feishu_content, title)
-    print(f"  ✅ 标签: {tag_result['tags']}")
-    print(f"  ✅ 标签说明: {tag_result['tag_desc']}")
-    print(f"  ✅ 标签频次: {tag_result['tag_freq']}")
+    print(f"\n[步骤2] 构建 LLM 标签提取提示词")
+    llm_prompt = build_llm_prompt(feishu_content, title)
+    print(f"  ✅ 提示词已生成（内容前100字）：")
+    print(f"     {feishu_content[:100].replace(chr(10), ' ')}...")
 
-    # ── 步骤3：计算时间戳 ────────────────────────────
-    print(f"\n[步骤3] 计算时间戳")
-    if date_str:
-        publish_ms = str_to_ms(date_str)
-    else:
-        publish_ms = None
-    print(f"  ✅ 时间戳: {publish_ms}")
+    # 时间戳
+    publish_ms = str_to_ms(date_str) if date_str else None
 
-    # ── 步骤4：写入多维表格（Agent 调用 OpenClaw 工具）───────────
-    # 这里只返回要写入的字段数据
-    # 实际写入由 Agent 调用 feishu_bitable_create_record 完成
-
-    record_fields = {
-        FIELD_FEISHU_LINK: {
-            "link": feishu_link,
-            "text": title,
-        },
+    # 构建不含标签的字段（供 Agent 填入标签后使用）
+    base_fields = {
+        FIELD_FEISHU_LINK: {"link": feishu_link, "text": title},
         FIELD_TOPIC_ID: zsxq_topic_id,
         FIELD_TITLE: title,
         FIELD_AUTHOR: author,
         FIELD_LINK: zsxq_url,
     }
-
     if publish_ms:
-        record_fields[FIELD_PUBLISH_TIME] = publish_ms
-
-    tag_fields = format_record_tags(
-        tag_result["tags"],
-        tag_result["tag_desc"],
-        tag_result["tag_freq"],
-    )
-    record_fields.update(tag_fields)
+        base_fields[FIELD_PUBLISH_TIME] = publish_ms
 
     return {
         "success": True,
-        "step": "ready_to_write",
-        "record_fields": record_fields,
-        "tags": tag_result["tags"],
+        "step": "llm_tag_needed",
+        "llm_prompt": llm_prompt,
+        "base_fields": base_fields,
         "title": title,
         "feishu_link": feishu_link,
-        "instruction": (
-            "请调用 feishu_bitable_create_record 创建记录：\n"
-            f"  app_token={BITABLE_APP_TOKEN}\n"
-            f"  table_id={BITABLE_TABLE_ID}\n"
-            f"  fields={json.dumps(record_fields, ensure_ascii=False, indent=2)}"
-        ),
+        "next_step": "call_llm_and_write",
+        "instruction": textwrap.dedent(f"""\
+            请用以下提示词调用 LLM 提取标签，然后写入多维表格。
+
+            ## LLM 提示词
+            {llm_prompt}
+
+            ## 操作步骤
+            1. 将提示词发给 LLM（当前 Agent 本身就是 LLM，直接用自己回答）
+            2. 从 LLM 回复中解析出 tags 列表（JSON 格式）
+            3. 用下方 fields 创建多维表格记录：
+               app_token={BITABLE_APP_TOKEN}
+               table_id={BITABLE_TABLE_ID}
+               fields={{
+                 *base_fields（已填好）*,
+                 "标签": <LLM返回的tags列表>,
+                 "标签说明": <LLM返回的reason说明>,
+                 "标签频次": ""
+               }}
+            4. 调用 feishu_bitable_create_record 完成写入
+        """),
     }
 
+
+# ============================================================
+# 主入口
+# ============================================================
 
 def main():
     if len(sys.argv) < 2:
         print("用法: python3 engine.py <ZSXQ分享链接>")
-        print("示例: python3 engine.py https://t.zsxq.com/6L4Ry")
         sys.exit(1)
-
-    share_url = sys.argv[1]
-    result = run(share_url)
+    result = run(sys.argv[1])
     print(f"\n结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
 
 
