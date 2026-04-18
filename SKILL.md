@@ -1,11 +1,11 @@
 ---
 name: zsxq-to-feishu
-version: 1.0.0
+version: 1.1.0
 description: "将知识星球（ZSXQ）分享链接转化为结构化数据，自动提取标签并写入 Feishu 多维表格。触发词：拉取 ZSXQ、整理 ZSXQ 内容、ZSXQ 到飞书、知识星球内容入库。"
 metadata:
   requires:
     bins: ["node"]
-    scripts: ["extractor.py", "tagger.py", "engine.py", "config.py"]
+    scripts: ["extractor_share.py", "extractor.py", "tagger.py", "engine.py", "config.py"]
   scriptsDir: "scripts/"
 ---
 
@@ -67,32 +67,65 @@ metadata:
 
 ## 完整执行流程
 
-### 步骤 1：提取 ZSXQ 元数据
+### 步骤 1：获取 ZSXQ 分享链接
 
-使用 Playwright 连接本地 Chrome（CDP 模式），从分享链接页面提取飞书文档链接和话题元数据。
+分享链接由用户提供，格式为 `https://t.zsxq.com/xxxx` 或话题详情页 URL。
+
+**用户操作**：
+1. 在知识星球 App/网页版打开任意话题
+2. 点右上角「···」→「复制链接」→ 得到话题详情页 URL（格式 `https://wx.zsxq.com/dms/xxx/activity/messages`）
+3. 将链接发送给 Agent
+
+---
+
+### 步骤 2：提取 ZSXQ 元数据
+
+使用 Playwright CDP 模式连接本地 Chrome，从分享链接提取话题元数据 + 飞书文档链接。
 
 ```bash
 cd ~/.qclaw/skills/zsxq-to-feishu/scripts
-python3 extractor.py "https://t.zsxq.com/6L4Ry"
+python3 extractor_share.py "https://t.zsxq.com/6L4Ry"
 ```
+
+**提取流程**（自动完成）：
+1. Playwright 导航到分享链接（自动跳转话题详情页）
+2. `window.location.href` 获取话题永久链接（Angular SPA 的 pushState 导航后仍可读）
+3. 正则匹配页面正文提取作者/时间/标题
+4. 点击「展开全部」展开话题正文（含评论中的飞书链接）
+5. 从 DOM 提取所有飞书文档链接（`a[href]` 包含 `feishu.cn`）
 
 返回：
 ```json
 {
   "success": true,
-  "feishu_link": "https://my.feishu.cn/wiki/...",
+  "zsxq_url": "https://wx.zsxq.com/dms/xxxx/activity/messages",
   "title": "话题标题",
   "author": "作者名",
   "date_str": "2026-04-09 14:38",
-  "zsxq_url": "https://wx.zsxq.com/dms/..."
+  "feishu_links": [
+    "https://my.feishu.cn/wiki/xxx",
+    "https://my.feishu.cn/docx/yyy"
+  ],
+  "expanded": true
 }
 ```
 
-**关键点**：
-- ZSXQ 需要登录态，CDP 连接本地 Chrome（`http://localhost:28800`）复用登录 Cookie
-- 飞书链接从 DOM 中的 `<a href>` 提取（关键字：`feishu.cn/wiki` 或 `feishu.cn/docx`）
-- 作者从正文正则匹配：`/返回\s+[^\s]+\s+([^\s（(]{1,10})/`
-- 时间从正文正则匹配：`/([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2})/`
+**CDP 连接要求**：
+- Chrome 必须开启 Remote Debugging：`/Applications/Google Chrome.app --remote-debugging-port=28800`
+- Playwright CDP 模式：`chromium.connectOverCDP('http://localhost:28800')`
+- 复用浏览器登录 Cookie，无需重新认证
+
+**作者正则**（从话题正文提取）：
+```
+格式：返回 {星球名} {作者} {时间}
+正则：/返回\s+[^\s]+\s+([^\s（(]{1,10})\s+\d{4}-\d{2}-\d{2}/
+示例：返回 AI破局俱乐部 行者 2026-04-09 14:38 → author = "行者"
+```
+
+**时间正则**：
+```
+正则：/([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2})/
+```
 
 ### 步骤 2：读取飞书文档正文
 
@@ -180,7 +213,8 @@ zsxq-to-feishu/
 ├── SKILL.md              ← 本文件，唯一真相来源
 ├── scripts/
 │   ├── config.py         ← 配置常量 + 标签持久化（JSON）
-│   ├── extractor.py      ← Playwright 提取 ZSXQ 元数据
+│   ├── extractor_share.py ← ZSXQ 分享链接提取（CDP + Playwright）
+│   ├── extractor.py      ← ZSXQ 元数据提取（旧版，保留兼容）
 │   ├── tagger.py         ← jieba 分词 + 混合标签提取算法
 │   └── engine.py         ← 主流程编排
 ├── data/
@@ -189,13 +223,18 @@ zsxq-to-feishu/
     └── (预留扩展)
 ```
 
+**extractor_share.py**（推荐使用）：
+- 输入：ZSXQ 分享链接
+- 输出：话题永久链接 + 元数据 + 飞书链接列表
+- 技术：Playwright CDP 连接本地 Chrome
+
 ---
 
 ## 工具速查
 
 | 操作 | 工具/命令 | 说明 |
 |------|----------|------|
-| 提取 ZSXQ 元数据 | `python3 extractor.py <url>` | CDP 登录态 |
+| 提取 ZSXQ 分享链接 | `python3 extractor_share.py <url>` | CDP + Playwright，含飞书链接列表 |
 | 提取标签 | `extract_tags(content, title)` | 返回 tags/llm_needed/llm_context |
 | LLM生成标签固化 | `persist_new_abstract_tags(["新标签"])` | 写入 JSON 文件 |
 | 列出所有抽象标签 | `list_abstract_tags()` | 从 JSON 读取 |
