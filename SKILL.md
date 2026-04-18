@@ -17,6 +17,25 @@ metadata:
 >
 > ⚠️ **本文档是唯一真相来源**，代码与文档保持完全同步。每次修改代码后必须同步更新本 SKILL.md。
 
+## 标签体系（混合方案 v2）
+
+**抽象标签**（描述内容类别）：持久化到 JSON 文件，支持动态追加
+- 初始标签：`写作/提示词/智能体/获客/自媒体`
+- 新标签由 **LLM 生成 → Agent 固化到 JSON** → 后续自动复用
+
+**快速判断**（不依赖 LLM）：当规则匹配不上时，用 QUICK_TAG_RULES 做 fallback：
+- `编程开发`：Python/代码/cursor/claude code/...
+- `效率工具`：Notion/工作流/自动化/模板/...
+- `AI研究`：论文/模型/benchmark/DeepSeek/...
+- `学习教育`：教程/课程/入门/指南/...
+- `生活应用`：美食/健身/旅行/...
+
+**具体功能标签**（描述具体应用场景）：始终由规则动态生成，不固化
+- `口语陪练/AI伙伴/PPT制作/Claude Code/Cursor编程/DeepSeek/小红书运营/视频创作/千人大会/Coze智能体`
+- 新功能标签随内容自动新增，不需要固化
+
+**LLM 介入条件**：已知标签 + 快速规则都匹配不上时，生成 `llm_context`，Agent 读取后调用 LLM，调用 `persist_new_abstract_tags()` 固化结果。
+
 ## 能力概述
 
 1. **接收** ZSXQ 分享链接（如 `https://t.zsxq.com/6L4Ry`）
@@ -87,27 +106,25 @@ feishu_doc(action="read", doc_token="QVtCw3sIji9qNvkEEjWckpB8ncq")
 
 ### 步骤 3：智能标签提取
 
-使用 `scripts/tagger.py` 分析正文，自动生成标签。
+```python
+# Agent 调用 tagger.py
+feishu_doc(action="read", doc_token="...")
+# 获取正文 content 后：
+from tagger import extract_tags, persist_new_abstract_tags
 
-```bash
-python3 scripts/tagger.py  # 内部函数调用，非命令行
+result = extract_tags(content, title)
+# result["llm_needed"] == True 时，需要 Agent 调 LLM
 ```
 
-标签体系：
+**算法流程**：
+1. jieba 分词 + 词频统计
+2. 从 JSON 文件加载已知抽象标签，规则匹配
+3. 匹配不上 → QUICK_TAG_RULES 快速判断（不依赖 LLM）
+4. 仍匹配不上 → `result["llm_needed"] = True`，生成 `llm_context`
+5. Agent 调 LLM 生成新标签 → `persist_new_abstract_tags()` 固化到 JSON
 
-**抽象标签**（描述内容类别）：
-- `写作` — AI 辅助写作、文案创作
-- `提示词` — Prompt Engineering
-- `智能体` — Agent/智能体应用
-- `获客` — 变现、商业化
-- `自媒体` — 内容创业、个人IP
-
-**具体功能标签**（描述具体应用场景，随内容新增）：
-- `口语陪练` — AI 英语口语练习
-- `AI伙伴` — Coze Agent World / AI Companion
-- `PPT制作` — 演示文稿制作
-- `Claude Code` — Claude Code 写作辅助
-- 其他按内容新增
+**抽象标签**：持久化到 `data/abstract_tags.json`，新标签固化后自动加入
+**功能标签**：动态生成，不需要固化
 
 **标签说明格式**：`{标签名}：{一句话说明}，{关键指标}`
 
@@ -162,10 +179,12 @@ ms = int(dt.timestamp() * 1000)  # 1775716680000
 zsxq-to-feishu/
 ├── SKILL.md              ← 本文件，唯一真相来源
 ├── scripts/
-│   ├── config.py         ← 多维表格配置常量（app_token/table_id/字段名）
+│   ├── config.py         ← 配置常量 + 标签持久化（JSON）
 │   ├── extractor.py      ← Playwright 提取 ZSXQ 元数据
-│   ├── tagger.py         ← jieba 分词 + 标签提取算法
+│   ├── tagger.py         ← jieba 分词 + 混合标签提取算法
 │   └── engine.py         ← 主流程编排
+├── data/
+│   └── abstract_tags.json  ← 抽象标签持久化文件（动态追加）
 └── references/
     └── (预留扩展)
 ```
@@ -174,14 +193,15 @@ zsxq-to-feishu/
 
 ## 工具速查
 
-| 操作 | 工具/命令 | 踩坑 |
+| 操作 | 工具/命令 | 说明 |
 |------|----------|------|
-| 提取 ZSXQ 元数据 | `python3 extractor.py <url>` | 需要 CDP 登录态 |
-| 提取标签 | `extract_tags(content, title)` | jieba 分词 |
+| 提取 ZSXQ 元数据 | `python3 extractor.py <url>` | CDP 登录态 |
+| 提取标签 | `extract_tags(content, title)` | 返回 tags/llm_needed/llm_context |
+| LLM生成标签固化 | `persist_new_abstract_tags(["新标签"])` | 写入 JSON 文件 |
+| 列出所有抽象标签 | `list_abstract_tags()` | 从 JSON 读取 |
 | 时间戳计算 | `str_to_ms("2026-04-09 14:38")` | 必须毫秒级 |
 | 读取飞书文档 | `feishu_doc(action="read")` | — |
 | 创建记录 | `feishu_bitable_create_record` | MultiSelect 新值自动创建 |
-| 更新标签 | `feishu_bitable_update_record` | 同上 |
 
 ---
 
