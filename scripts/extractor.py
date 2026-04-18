@@ -70,14 +70,33 @@ const { chromium } = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modul
       // 标题：移除末尾的 " -知识星球" 及各种变体
       let title = document.title.replace(/\s*[-−]\s*知识星球\s*$/, '').trim();
 
-      // 作者：从正文匹配 "返回 {星球名} {作者名} {时间}"
-      // 格式如: "返回 AI破局俱乐部 行者 2026-04-09 14:38"
-      const authorMatch = body.match(/返回\\s+[^\\s]+\\s+([^\\s（(]{1,10})\\s+\\d{4}-\\d{2}-\\d{2}/);
-      const author = authorMatch ? authorMatch[1] : null;
+      // 作者：从正文按行提取
+      // 结构：第N行 "返回 {星球名}" → 第N+1行 "{作者名}" → 第N+2行 "{日期}"
+      const lines = body.split('\\n');
+      let author = null;
+      for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i].trim();
+        // 找 "返回 {星球名}" 所在行
+        if (/^返回\s+/.test(line)) {
+          // 作者在下一行
+          const next = lines[i + 1] ? lines[i + 1].trim() : '';
+          // 清理回复标记，取纯名字
+          author = next.replace(/\s*回复\s*.*$/, '').trim();
+          break;
+        }
+      }
 
-      // 发布时间：从正文匹配 "YYYY-MM-DD HH:mm"
-      const timeMatch = body.match(/(\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2})/);
-      const dateStr = timeMatch ? timeMatch[1] : null;
+      // 发布时间：找 "返回 {星球}" 行的下下行（第N+2行）
+      let dateStr = null;
+      for (let i = 0; i < lines.length - 2; i++) {
+        const line = lines[i].trim();
+        if (/^返回\s+/.test(line)) {
+          const dateLine = lines[i + 2] ? lines[i + 2].trim() : '';
+          const dateMatch = dateLine.match(/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/);
+          dateStr = dateMatch ? dateMatch[1] : null;
+          break;
+        }
+      }
 
       return { title, author, dateStr, url: document.URL };
     });
