@@ -59,23 +59,23 @@ def build_llm_prompt(content: str, title: str = "") -> str:
 # 解析 LLM 输出
 # ============================================================
 
-def parse_llm_response(raw: str, content: str = "") -> dict:
+def parse_llm_response(raw: str) -> dict:
     """
-    解析 LLM 返回的标签 JSON，并统计标签词在正文中的出现频次
+    解析 LLM 返回的标签 JSON
 
     参数:
         raw: LLM 原始输出
-        content: 文档正文（用于频次统计）
 
     返回:
-        {"tags": [...], "tag_desc": "...", "tag_freq": "..."}
+        {"tags": [...], "tag_desc": "...", "tag_freq": ""}
     """
     raw = raw.strip()
 
-    # 解析 JSON
+    # 尝试直接解析
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        # 从输出中提取 JSON 块
         start = raw.find('{')
         end = raw.rfind('}') + 1
         if start >= 0 and end > start:
@@ -96,55 +96,11 @@ def parse_llm_response(raw: str, content: str = "") -> dict:
     if not tag_desc:
         tag_desc = " / ".join(tags)
 
-    # 统计标签词在正文中的出现频次
-    tag_freq = _build_tag_freq(tags, content)
-
     return {
         "tags": tags,
         "tag_desc": tag_desc,
-        "tag_freq": tag_freq,
+        "tag_freq": "",
     }
-
-
-def _build_tag_freq(tags: list, content: str) -> str:
-    """
-    简单关键词频次统计
-
-    对每个标签，统计其在正文中出现的次数（不区分大小写，整词匹配）
-    返回格式：标签1:3次、标签2:1次
-    """
-    if not tags or not content:
-        return ""
-
-    # 扩展关键词（同义词/子词，增加匹配覆盖面）
-    KEYWORD_EXPANSION = {
-        "写作": ["写作", "文章", "文案", "创作", "写文章", "写作指南"],
-        "智能体": ["智能体", "agent", "agentic", "agent world", "ai伙伴"],
-        "效率工具": ["效率", "提效", "工具", "工作流", "自动化", "workflow"],
-        "编程开发": ["编程", "代码", "python", "cursor", "claude code", "github", "api"],
-        "AI研究": ["ai", "大模型", "模型", "llm", "deepseek", "论文", "benchmark", "训练", "gpt", "chatgpt", "gemini", "claude"],
-        "学习教育": ["学习", "教程", "课程", "入门", "指南", "教学", "教育", "练习"],
-        "获客": ["变现", "赚钱", "创业", "商业", "收入", "获客", "变现"],
-        "自媒体": ["自媒体", "ip", "个人ip", "内容创业", "公众号", "视频号", "小红书"],
-        "提示词": ["提示词", "prompt", "prompting", "prompt engineering"],
-    }
-
-    freq_map = {}
-    text_lower = content.lower()
-
-    for tag in tags:
-        keywords = KEYWORD_EXPANSION.get(tag, [tag])
-        total = 0
-        for kw in keywords:
-            total += text_lower.count(kw.lower())
-        if total > 0:
-            freq_map[tag] = total
-
-    if not freq_map:
-        return ""
-
-    sorted_freq = sorted(freq_map.items(), key=lambda x: x[1], reverse=True)[:5]
-    return "、".join([f"{t}{c}次" for t, c in sorted_freq])
 
 
 # ============================================================
