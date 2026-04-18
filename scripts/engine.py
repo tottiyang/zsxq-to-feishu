@@ -65,7 +65,7 @@ def run(share_url: str) -> dict:
         return {"success": False, "error": "[步骤1失败] 未找到飞书文档链接"}
 
     feishu_token = extract_feishu_token(feishu_link)
-    topic_id = f"wiki_{feishu_token}"
+    zsxq_topic_id = meta.get("zsxq_topic_id") or feishu_token
 
     print(f"  ✅ 标题: {title}")
     print(f"  ✅ 作者: {author}")
@@ -85,7 +85,7 @@ def run(share_url: str) -> dict:
         "author": author,
         "date_str": date_str,
         "zsxq_url": zsxq_url,
-        "topic_id": topic_id,
+        "zsxq_topic_id": zsxq_topic_id,
         "next_step": "read_feishu_doc",
         "instruction": (
             f"请调用 feishu_doc(action='read', doc_token='{feishu_token}') "
@@ -114,7 +114,7 @@ def process_content(
         author: 作者
         date_str: 发布时间 "YYYY-MM-DD HH:mm"
         zsxq_url: ZSXQ 分享链接
-        topic_id: 话题 ID (wiki_XXXXX)
+        topic_id: ZSXQ topic_id，约17位数字，如 45544844845444248
         feishu_content: 飞书文档正文（纯文本）
 
     返回:
@@ -144,7 +144,7 @@ def process_content(
             "link": feishu_link,
             "text": title,
         },
-        FIELD_TOPIC_ID: topic_id,
+        FIELD_TOPIC_ID: zsxq_topic_id,
         FIELD_TITLE: title,
         FIELD_AUTHOR: author,
         FIELD_LINK: zsxq_url,

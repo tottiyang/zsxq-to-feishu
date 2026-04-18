@@ -75,13 +75,25 @@ const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_mod
       return {{ title, author, dateStr, url: document.URL }};
     }});
 
+    // 从 URL 解析 ZSXQ topic_id
+    // 格式: https://wx.zsxq.com/dms/{group_id}/{topic_id}/activity/messages
+    const urlParts = meta.url.split('/');
+    let zsxqTopicId = null;
+    for (let i = 0; i < urlParts.length; i++) {
+      if (urlParts[i] === 'dms' && urlParts[i + 2]) {
+        zsxqTopicId = urlParts[i + 2];
+        break;
+      }
+    }
+
     const result = {{
       success: true,
       feishu_link: feishuData.feishuLink,
       title: meta.title,
       author: meta.author,
       date_str: meta.dateStr,
-      zsxq_url: meta.url
+      zsxq_url: meta.url,
+      zsxq_topic_id: zsxqTopicId  // ← ZSXQ topic_id，约17位数字
     }};
 
     console.log(JSON.stringify(result));
