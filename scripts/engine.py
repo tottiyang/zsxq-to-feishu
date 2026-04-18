@@ -101,7 +101,7 @@ def process_content(
     author: str,
     date_str: str,
     zsxq_url: str,
-    topic_id: str,
+    zsxq_topic_id: str,
     feishu_content: str,
 ) -> dict:
     """
@@ -114,7 +114,7 @@ def process_content(
         author: 作者
         date_str: 发布时间 "YYYY-MM-DD HH:mm"
         zsxq_url: ZSXQ 分享链接
-        topic_id: ZSXQ topic_id，约17位数字，如 45544844845444248
+        zsxq_topic_id: ZSXQ topic_id，约17位数字，如 45544844845444248
         feishu_content: 飞书文档正文（纯文本）
 
     返回:

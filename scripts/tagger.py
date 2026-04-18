@@ -352,6 +352,17 @@ def list_abstract_tags() -> list:
 # 主入口
 # ============================================================
 
+
+def format_record_tags(tags: list, tag_desc: str, tag_freq: str) -> dict:
+    """
+    将标签提取结果格式化为多维表格写入字段
+    """
+    return {
+        "标签": tags,
+        "标签说明": tag_desc,
+        "标签频次": tag_freq,
+    }
+
 if __name__ == "__main__":
     import sys
 
