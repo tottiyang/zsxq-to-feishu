@@ -159,16 +159,17 @@ def process_content(
             ## 操作步骤
             1. 将提示词发给 LLM（当前 Agent 本身就是 LLM，直接用自己回答）
             2. 从 LLM 回复中解析出 tags 列表（JSON 格式）
-            3. 用下方 fields 创建多维表格记录：
+            3. 用 `parse_llm_response(LLM回复, feishu_content)` 解析标签并自动计算频次
+            4. 用下方 fields 创建多维表格记录：
                app_token={BITABLE_APP_TOKEN}
                table_id={BITABLE_TABLE_ID}
                fields={{
                  *base_fields（已填好）*,
-                 "标签": <LLM返回的tags列表>,
-                 "标签说明": <LLM返回的reason说明>,
-                 "标签频次": ""
+                 "标签": <tags列表>,
+                 "标签说明": <tag_desc>,
+                 "标签频次": <tag_freq>   ← parse_llm_response 已自动计算
                }}
-            4. 调用 feishu_bitable_create_record 完成写入
+            5. 调用 feishu_bitable_create_record 完成写入
         """),
     }
 
