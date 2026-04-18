@@ -22,7 +22,6 @@ FIELD_AUTHOR = "作者"
 FIELD_PUBLISH_TIME = "发布时间"
 FIELD_TAGS = "标签"
 FIELD_TAG_DESC = "标签说明"
-FIELD_TAG_FREQ = "标签频次"
 FIELD_LINK = "链接"
 
 

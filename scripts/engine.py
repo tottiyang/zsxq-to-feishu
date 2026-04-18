@@ -27,7 +27,6 @@ from config import (
     FIELD_PUBLISH_TIME,
     FIELD_TAGS,
     FIELD_TAG_DESC,
-    FIELD_TAG_FREQ,
     FIELD_LINK,
     str_to_ms,
 )
@@ -165,8 +164,7 @@ def process_content(
                fields={{
                  *base_fields（已填好）*,
                  "标签": <LLM返回的tags列表>,
-                 "标签说明": <LLM返回的reason说明>,
-                 "标签频次": ""
+                 "标签说明": <LLM返回的reason说明>
                }}
             4. 调用 feishu_bitable_create_record 完成写入
         """),

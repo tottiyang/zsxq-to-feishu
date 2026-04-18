@@ -30,7 +30,6 @@ metadata:
 | 发布时间 | 日期 | 毫秒级时间戳 |
 | 标签 | 多选 | 2-4个，由 LLM 提取 |
 | 标签说明 | 文本 | LLM 理由说明 |
-| 标签频次 | 文本 | 空（LLM 方案不计算频次） |
 | 链接 | 文本 | ZSXQ 分享链接 |
 
 **app_token**: `XpGMbvYwsaNvZMsBzZ3cN1DRnOc`
@@ -89,7 +88,7 @@ llm_prompt = build_llm_prompt(feishu_content, title)
 # Agent 将提示词发给自己（LLM）提取标签
 # 解析 LLM 回复
 tag_result = parse_llm_response(llm_response)
-# tag_result: {"tags": [...], "tag_desc": "...", "tag_freq": ""}
+# tag_result: {"tags": [...], "tag_desc": "..."}
 ```
 
 参考标签（可直接使用）：`写作、提示词、智能体、获客、自媒体、AI研究、编程开发、效率工具、学习教育`
@@ -112,7 +111,6 @@ feishu_bitable_create_record(
         "发布时间": 1776256080000,          # 毫秒级时间戳
         "标签": ["写作", "智能体"],
         "标签说明": "标签1 / 标签2 理由说明",
-        "标签频次": "",
         "链接": "https://t.zsxq.com/XXXX"
     }
 )
@@ -161,3 +159,4 @@ zsxq-to-feishu/
 - "拉取 ZSXQ" / "整理 ZSXQ" / "ZSXQ 到飞书"
 - "知识星球内容入库" / "抓取 ZSXQ 内容"
 - 发送 ZSXQ 分享链接（自动识别处理）
+��处理）

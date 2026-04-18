@@ -67,7 +67,7 @@ def parse_llm_response(raw: str) -> dict:
         raw: LLM 原始输出
 
     返回:
-        {"tags": [...], "tag_desc": "...", "tag_freq": ""}
+        {"tags": [...], "tag_desc": "..."}
     """
     raw = raw.strip()
 
@@ -99,13 +99,8 @@ def parse_llm_response(raw: str) -> dict:
     return {
         "tags": tags,
         "tag_desc": tag_desc,
-        "tag_freq": "",
     }
 
-
-# ============================================================
-# 格式化（供 engine.py 调用）
-# ============================================================
 
 def extract_tags(content: str, title: str = "") -> dict:
     """
@@ -116,7 +111,6 @@ def extract_tags(content: str, title: str = "") -> dict:
             "llm_prompt": "...",   # LLM 提示词，供 Agent 使用
             "tags": [],            # 占位（Agent 填入）
             "tag_desc": "",        # 占位
-            "tag_freq": "",
             "llm_needed": True,    # 标记需要 Agent 填充
         }
     """
@@ -124,15 +118,5 @@ def extract_tags(content: str, title: str = "") -> dict:
         "llm_prompt": build_llm_prompt(content, title),
         "tags": [],
         "tag_desc": "",
-        "tag_freq": "",
         "llm_needed": True,
-    }
-
-
-def format_record_tags(tags: list, tag_desc: str, tag_freq: str) -> dict:
-    """格式化为多维表格字段"""
-    return {
-        "标签": tags,
-        "标签说明": tag_desc,
-        "标签频次": tag_freq,
     }
