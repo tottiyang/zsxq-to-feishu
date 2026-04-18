@@ -68,6 +68,32 @@ python3 engine.py "https://t.zsxq.com/6L4Ry"
 
 ---
 
+### 阶段一附：获取话题分享链接
+
+**星球 group_id：**
+- AI破局俱乐部：`15552545485212`
+
+**方式A — 已知 topic_id，获取分享链接**
+
+```python
+from extractor_share import extract_share_url
+result = extract_share_url("45544844845444248", group_id="15552545485212")
+# → {"share_url": "https://t.zsxq.com/xxxx", "topic_id": "...", "title": "..."}
+```
+
+**方式B — 已知分享链接，完整提取元数据 + 飞书链接**
+
+```python
+from extractor_share import extract_full
+result = extract_full("https://t.zsxq.com/XXXX")
+# → {"share_url", "topic_id", "title", "author", "date_str", "feishu_links": []}
+```
+
+**如何获取 topic_id：**
+打开 ZSXQ 星球话题页 → Chrome DevTools → Network → 筛选 `/topics/` 请求 → 响应 body 中含 `topic_id`（约17位数字）
+
+---
+
 ### 阶段二：读取飞书文档
 
 Agent 调用 `feishu_doc` 读取正文（截取前4000字传给 tagger）：
