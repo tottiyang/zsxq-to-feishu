@@ -1,6 +1,6 @@
 ---
 name: zsxq-to-feishu
-version: 1.1.0
+version: 1.1.2
 description: "将知识星球（ZSXQ）分享链接转化为结构化数据，自动提取标签并写入 Feishu 多维表格。触发词：拉取 ZSXQ、整理 ZSXQ 内容、ZSXQ 到飞书、知识星球内容入库。"
 metadata:
   requires:
@@ -125,6 +125,7 @@ python3 extractor_share.py "https://t.zsxq.com/6L4Ry"
 2. 拦截 `GET /v2/topics/{topic_id}/share_url` 响应 → 提取 `share_url` 和 `topic_id`
 3. 点击「展开全部」展开话题全文（含评论中的飞书链接）
 4. 从 DOM 提取所有飞书文档链接（`a[href]` 包含 `feishu.cn`）
+   - **⚠️ 硬规则：没有飞书文档链接的话题直接跳过，不写入多维表格**
 5. 正则匹配正文提取作者/时间/标题
 
 返回：
