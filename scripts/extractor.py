@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 ZSXQ 分享链接数据提取器
-从知识星球分享链接提取：飞书文档链接 + 话题元数据
+从知识星球分享链接提取：飞书文档链接 + 话题元数据 + ZSXQ topic_id
 
 技术方案：Playwright 连接本地 Chrome CDP，复用登录态
 CDP 地址: http://localhost:28800
 """
 
 import json
+import re
 import subprocess
 import sys
 
@@ -21,7 +22,9 @@ def extract_zsxq_share(share_url: str) -> dict:
 
     返回:
         {
+            "success": True,
             "feishu_link": "https://my.feishu.cn/wiki/...",
+            "zsxq_topic_id": "45544844845444248",   # ← ZSXQ topic_id，约17位数字
             "title": "话题标题",
             "author": "作者名",
             "date_str": "2026-04-09 14:38",
@@ -31,7 +34,10 @@ def extract_zsxq_share(share_url: str) -> dict:
     踩坑记录:
         - ZSXQ 需要登录态，普通无头浏览器会跳转到登录页
         - 解决方案：Playwright CDP 模式连接本地 Chrome，复用登录 Cookie
+        - zsxq_topic_id 在 Python 端从 zsxq_url 解析，不嵌在 JS f-string 里
     """
+    # 构造 JS 代码（注意：JS 里不要有 { } 裸大括号，避免破坏 Python f-string 解析）
+    # topic_id 提取改为 Python 端从 zsxq_url 解析
     js_code = f"""
 const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright');
 
@@ -75,25 +81,13 @@ const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_mod
       return {{ title, author, dateStr, url: document.URL }};
     }});
 
-    // 从 URL 解析 ZSXQ topic_id
-    // 格式: https://wx.zsxq.com/dms/{group_id}/{topic_id}/activity/messages
-    const urlParts = meta.url.split('/');
-    let zsxqTopicId = null;
-    for (let i = 0; i < urlParts.length; i++) {
-      if (urlParts[i] === 'dms' && urlParts[i + 2]) {
-        zsxqTopicId = urlParts[i + 2];
-        break;
-      }
-    }
-
     const result = {{
       success: true,
       feishu_link: feishuData.feishuLink,
       title: meta.title,
       author: meta.author,
       date_str: meta.dateStr,
-      zsxq_url: meta.url,
-      zsxq_topic_id: zsxqTopicId  // ← ZSXQ topic_id，约17位数字
+      zsxq_url: meta.url
     }};
 
     console.log(JSON.stringify(result));
@@ -117,9 +111,42 @@ const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_mod
 
     try:
         data = json.loads(result.stdout.strip())
-        return data
     except json.JSONDecodeError:
         return {"success": False, "error": f"JSON解析失败: {result.stdout[:200]}"}
+
+    if not data.get("success"):
+        return {"success": False, "error": data.get("error", "未知错误")}
+
+    # ── ZSXQ topic_id 提取（Python 端，从 URL 解析）────────────
+    # 格式: https://wx.zsxq.com/dms/{group_id}/{topic_id}/activity/messages
+    zsxq_url = data.get("zsxq_url", "")
+    zsxq_topic_id = _parse_topic_id(zsxq_url)
+
+    data["zsxq_topic_id"] = zsxq_topic_id
+    return data
+
+
+def _parse_topic_id(zsxq_url: str) -> str:
+    """
+    从 ZSXQ URL 解析 topic_id
+
+    格式: https://wx.zsxq.com/dms/{group_id}/{topic_id}/activity/messages
+    示例: https://wx.zsxq.com/dms/15552545485212/8855218548218/activity/messages
+          → topic_id = 8855218548218
+    """
+    if not zsxq_url:
+        return ""
+    # 匹配 /dms/{group_id}/{topic_id}/ 或 /d2g/{group_id}/{topic_id}/
+    patterns = [
+        r'/dms/\d+/(\d+)/activity',
+        r'/d2g/\d+/(\d+)',
+        r'/(\d{15,20})/activity',     # fallback: 找15-20位数字段
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, zsxq_url)
+        if m:
+            return m.group(1)
+    return ""
 
 
 def extract_feishu_token(feishu_url: str) -> str:
@@ -130,7 +157,6 @@ def extract_feishu_token(feishu_url: str) -> str:
         url = "https://my.feishu.cn/wiki/SxRzwvSSWiTa7Kk57gKcQJbGnqg"
         token = extract_feishu_token(url)  # "SxRzwvSSWiTa7Kk57gKcQJbGnqg"
     """
-    import re
     match = re.search(r'/([A-Za-z0-9]+)(?:\?|$)', feishu_url)
     if match:
         return match.group(1)
