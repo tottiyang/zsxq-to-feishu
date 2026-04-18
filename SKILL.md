@@ -67,20 +67,53 @@ metadata:
 
 ## 完整执行流程
 
-### 步骤 1：获取 ZSXQ 分享链接
+### 步骤 1：自动化获取话题分享链接（核心能力）
 
-分享链接由用户提供，格式为 `https://t.zsxq.com/xxxx` 或话题详情页 URL。
+> ✅ 已验证成功（2026-04-18）：无需用户提供，Agent 自动从话题列表拦截。
 
-**用户操作**：
-1. 在知识星球 App/网页版打开任意话题
-2. 点右上角「···」→「复制链接」→ 得到话题详情页 URL（格式 `https://wx.zsxq.com/dms/xxx/activity/messages`）
-3. 将链接发送给 Agent
+**核心技术**：点击话题卡片的三个点按钮 → 触发 `GET /v2/topics/{topic_id}/share_url` API → Playwright 拦截响应 → 提取分享链接和 topic_id。
+
+```bash
+# 完整流程（Playwright 拦截 + 批量提取）
+node zsxq_complete.js
+# 输出：所有话题的 topic_id、分享链接、标题、作者、飞书链接
+```
+
+**三个点按钮定位**：
+```javascript
+// 三个点在 .talk-content-container 内的 p.ellipsis 元素
+const ellipsisBtns = document.querySelectorAll('p.ellipsis');
+```
+
+**API 响应拦截**：
+```javascript
+// Playwright 拦截 api.zsxq.com 的响应
+await page.route('**/api.zsxq.com/**', async route => {
+  const response = await route.fetch();
+  const body = await response.json();
+  if (body.topic?.share_url) {
+    // 提取 share_url: https://t.zsxq.com/xxxx
+    // 提取 topic_id: topic.topic_id（约17位数字）
+  }
+  route.continue();
+});
+```
+
+**已成功提取的分享链接（AI破局俱乐部示例）**：
+
+| 话题 | 作者 | 分享链接 | 飞书文档 |
+|------|------|---------|---------|
+| Claude code 写作指南 | 陈行之（皮特） | `https://t.zsxq.com/6L4Ry` | ✅ |
+| 45岁负债翻盘 | 晟豪加油 | `https://t.zsxq.com/2aFht` | ✅ |
+| AI英语口语陪练 | MQ老师 | `https://t.zsxq.com/ycQDT` | ✅ |
+| 没背景怎么靠AI翻盘 | 观星Meta | `https://t.zsxq.com/O0b4R` | ✅ |
+| 扣子2.5实测 | 行者 | `https://t.zsxq.com/ZVdnV` | ✅ |
 
 ---
 
 ### 步骤 2：提取 ZSXQ 元数据
 
-使用 Playwright CDP 模式连接本地 Chrome，从分享链接提取话题元数据 + 飞书文档链接。
+通过 Playwright CDP 拦截 api.zsxq.com 响应，自动提取 topic_id 和分享链接（步骤1已完成后）。
 
 ```bash
 cd ~/.qclaw/skills/zsxq-to-feishu/scripts
@@ -88,17 +121,18 @@ python3 extractor_share.py "https://t.zsxq.com/6L4Ry"
 ```
 
 **提取流程**（自动完成）：
-1. Playwright 导航到分享链接（自动跳转话题详情页）
-2. `window.location.href` 获取话题永久链接（Angular SPA 的 pushState 导航后仍可读）
-3. 正则匹配页面正文提取作者/时间/标题
-4. 点击「展开全部」展开话题正文（含评论中的飞书链接）
-5. 从 DOM 提取所有飞书文档链接（`a[href]` 包含 `feishu.cn`）
+1. Playwright CDP 导航到分享链接（自动跳转话题详情页）
+2. 拦截 `GET /v2/topics/{topic_id}/share_url` 响应 → 提取 `share_url` 和 `topic_id`
+3. 点击「展开全部」展开话题全文（含评论中的飞书链接）
+4. 从 DOM 提取所有飞书文档链接（`a[href]` 包含 `feishu.cn`）
+5. 正则匹配正文提取作者/时间/标题
 
 返回：
 ```json
 {
   "success": true,
-  "zsxq_url": "https://wx.zsxq.com/dms/xxxx/activity/messages",
+  "topic_id": "45544844845444248",
+  "share_url": "https://t.zsxq.com/6L4Ry",
   "title": "话题标题",
   "author": "作者名",
   "date_str": "2026-04-09 14:38",
@@ -110,15 +144,14 @@ python3 extractor_share.py "https://t.zsxq.com/6L4Ry"
 }
 ```
 
-**CDP 连接要求**：
-- Chrome 必须开启 Remote Debugging：`/Applications/Google Chrome.app --remote-debugging-port=28800`
-- Playwright CDP 模式：`chromium.connectOverCDP('http://localhost:28800')`
-- 复用浏览器登录 Cookie，无需重新认证
+**topic_id 格式**：约17位数字，如 `45544844845444248`
+
+**分享链接格式**：`https://t.zsxq.com/xxxx`（短链接）
 
 **作者正则**（从话题正文提取）：
 ```
 格式：返回 {星球名} {作者} {时间}
-正则：/返回\s+[^\s]+\s+([^\s（(]{1,10})\s+\d{4}-\d{2}-\d{2}/
+正则：/返回\s+[^\s]+\s+([^\s（(]{1,10})\s+\d{4}-\d{2}-\d{2}}/
 示例：返回 AI破局俱乐部 行者 2026-04-09 14:38 → author = "行者"
 ```
 
@@ -126,6 +159,11 @@ python3 extractor_share.py "https://t.zsxq.com/6L4Ry"
 ```
 正则：/([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2})/
 ```
+
+**CDP 连接要求**：
+- Chrome 必须开启 Remote Debugging：`/Applications/Google Chrome.app --remote-debugging-port=28800`
+- Playwright CDP 模式：`chromium.connectOverCDP('http://localhost:28800')`
+- 复用浏览器登录 Cookie，无需重新认证
 
 ### 步骤 2：读取飞书文档正文
 

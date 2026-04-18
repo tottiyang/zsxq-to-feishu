@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-ZSXQ 分享链接提取器（新版·完整流程）
+ZSXQ 分享链接提取器（v2.0·API 拦截方案）
 
-从 ZSXQ 分享链接提取：
-1. ZSXQ 话题详情永久链接（从 window.location.href 获取）
-2. 话题元数据（作者/时间/标题）
-3. 飞书文档链接（从展开内容中提取）
+核心能力：
+1. 点击话题卡片三个点 → 拦截 GET /v2/topics/{topic_id}/share_url 响应
+2. 获取 topic_id 和分享链接
+3. 展开话题全文，提取飞书文档链接
 
-技术方案：Playwright CDP 模式连接本地 Chrome，复用登录态
-CDP 地址: http://localhost:28800
+技术方案：Playwright CDP 模式连接本地 Chrome（localhost:28800）
 """
 
 import json
@@ -17,190 +16,220 @@ import sys
 import time
 
 
-def extract_from_share(share_url: str) -> dict:
+def extract_share_url(topic_id: str, group_id: str = "15552545485212") -> dict:
     """
-    从 ZSXQ 分享链接提取完整数据
+    通用方法：通过 topic_id 调用 ZSXQ API 获取分享链接
 
     参数:
-        share_url: ZSXQ 分享链接，如 https://t.zsxq.com/6L4Ry
+        topic_id: 话题 ID（约17位数字，如 "45544844845444248"）
+        group_id: 星球 ID（默认 AI破局俱乐部 15552545485212）
 
     返回:
-        {
-            "success": true,
-            "zsxq_url": "https://wx.zsxq.com/dms/...",  # ← 话题永久链接
-            "title": "话题标题",
-            "author": "作者名",
-            "date_str": "2026-04-09 14:38",
-            "feishu_links": ["https://my.feishu.cn/wiki/xxx", ...]
-        }
-
-    踩坑记录:
-        - 直接用 user token → user token 无 ZSXQ 登录态，必须走 CDP
-        - "展开全部"按钮点击 → 展开话题正文 + 评论中的飞书链接
-        - window.location.href 在话题详情页直接获取话题永久链接
+        {"share_url": "https://t.zsxq.com/xxxx", "topic_id": "...", "text": "话题标题"}
     """
     js_code = f"""
 const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright');
 
 (async () => {{
-  const browser = await chromium.connectOverCDP('http://localhost:28800');
-  const ctx = browser.contexts()[0];
-  const page = ctx.pages()[0];
+    const browser = await chromium.connectOverCDP('http://localhost:28800');
+    const ctx = browser.contexts()[0];
+    const page = ctx.pages()[0];
 
-  // 注入 history 拦截器，捕获 Angular SPA 的 pushState 导航
-  await page.evaluate(() => {{
-    window.__navLog = [];
-    window.__pushState = history.pushState;
-    history.pushState = function(s, t, u) {{
-      window.__navLog.push({{ type: 'pushState', url: u }});
-      return window.__pushState.apply(history, arguments);
-    }};
-    window.__replaceState = history.replaceState;
-    history.replaceState = function(s, t, u) {{
-      window.__navLog.push({{ type: 'replaceState', url: u }});
-      return window.__replaceState.apply(history, arguments);
-    }};
-  }});
+    // 注入拦截器：捕获 api.zsxq.com 的 share_url 响应
+    let shareResult = null;
+    await page.route('**/api.zsxq.com/**', async route => {{
+        const req = route.request();
+        const url = req.url();
+        if (url.includes('/topics/') && url.includes('/share_url')) {{
+            try {{
+                const resp = await route.fetch();
+                const body = await resp.json();
+                if (body.topic) {{
+                    shareResult = {{
+                        share_url: body.topic.share_url || '',
+                        topic_id: body.topic.topic_id || '',
+                        text: body.topic.text || ''
+                    }};
+                    console.log('SHARE_RESULT:' + JSON.stringify(shareResult));
+                }}
+            }} catch(e) {{
+                console.log('INTERCEPT_ERROR:' + e.message);
+            }}
+        }}
+        await route.continue();
+    }});
 
-  try {{
-    // Step 1: 导航到分享链接（会自动跳转到话题详情页）
-    await page.goto('{share_url}', {{ waitUntil: 'networkidle', timeout: 20000 }});
+    // 导航到话题详情页（自动触发 share_url API）
+    await page.goto('https://wx.zsxq.com/dms/{group_id}/{topic_id}/activity/messages', {{
+        waitUntil: 'networkidle', timeout: 20000
+    }});
     await page.waitForTimeout(3000);
 
-    const urlAfterNav = page.url();
-    console.log('导航后URL: ' + urlAfterNav);
-
-    // Step 2: 从 window.location.href 获取话题永久链接
-    // 格式: https://wx.zsxq.com/dms/{topic_id}/activity/messages
-    let zsxqUrl = urlAfterNav;
-    if (!zsxqUrl.includes('/dms/') && !zsxqUrl.includes('/d2g/')) {{
-      // 可能还在重定向，等一下
-      await page.waitForTimeout(5000);
-      zsxqUrl = page.url();
+    if (shareResult) {{
+        console.log('RESULT:' + JSON.stringify(shareResult));
+    }} else {{
+        console.log('ERROR:未获取到分享链接，请检查 topic_id 和登录态');
     }}
 
-    // Step 3: 提取话题元数据
-    const meta = await page.evaluate(() => {{
-      const body = document.body.innerText;
-
-      // 标题：从页面 title 提取，移除 " -知识星球" 后缀
-      let title = (document.title || '').replace(' -知识星球', '').trim();
-
-      // 作者：从正文匹配 "返回 {星球名} {作者名} {时间}"
-      // 格式如: "返回 AI破局俱乐部 行者 2026-04-09 14:38"
-      // 作者在时间前面，不含括号和空格后缀
-      let author = null;
-      const authorMatch = body.match(/返回\\s+[^\\s群]\\S+\\s+([^\\s（(]{{1,10}})\\s+\\d{{4}}-\\d{{2}}-\\d{{2}}/);
-      if (authorMatch) {{
-        author = authorMatch[1];
-      }} else {{
-        // Fallback: 找 "名字" 后跟日期时间
-        const altMatch = body.match(/([^\s（(]{{2,10}})\\s+\\d{{4}}-\\d{{2}}-\\d{{2}}\\s+\\d{{2}}:\\d{{2}}/);
-        if (altMatch) author = altMatch[1];
-      }}
-
-      // 发布时间
-      let dateStr = null;
-      const timeMatch = body.match(/([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\\s+[0-9]{{2}}:[0-9]{{2}})/);
-      if (timeMatch) dateStr = timeMatch[1];
-
-      return {{ title, author, dateStr, url: window.location.href }};
-    }});
-
-    // Step 4: 展开话题（如果有"展开全部"按钮）
-    let expanded = false;
-    let expandBtn = null;
-    try {{
-      // 查找"展开全部"按钮
-      expandBtn = page.locator('text="展开全部"').first();
-      const count = await page.locator('text="展开全部"').count();
-      if (count > 0) {{
-        await expandBtn.click({{ timeout: 5000 }});
-        await page.waitForTimeout(3000);
-        expanded = true;
-        console.log('已点击展开全部');
-      }}
-    }} catch(e) {{
-      console.log('展开全部未找到: ' + e.message);
-    }}
-
-    // Step 5: 提取飞书链接
-    const feishuLinks = await page.evaluate(() => {{
-      const anchors = Array.from(document.querySelectorAll('a[href]'));
-      const seen = new Set();
-      const links = [];
-      for (const a of anchors) {{
-        const href = a.href || '';
-        if (/feishu\\.cn/i.test(href)) {{
-          // 去掉 ?from=copylink 等参数
-          const clean = href.replace(/\\?.*$/, '');
-          if (!seen.has(clean)) {{
-            seen.add(clean);
-            links.push(clean);
-          }}
-        }}
-      }}
-      return links;
-    }});
-
-    // 最终确认 URL（可能经过 pushState 导航）
-    const finalUrl = await page.evaluate(() => window.location.href);
-    const pushUrls = await page.evaluate(() => JSON.stringify(window.__navLog || []));
-
-    const result = {{
-      success: true,
-      zsxq_url: finalUrl,
-      title: meta.title,
-      author: meta.author,
-      date_str: meta.dateStr,
-      feishu_links: feishuLinks,
-      expanded: expanded,
-      nav_log: JSON.parse(pushUrls || '[]')
-    }};
-
-    console.log('RESULT:' + JSON.stringify(result));
-  }} catch (err) {{
-    console.log('ERROR:' + err.message);
-  }} finally {{
     await browser.close();
-  }}
 }})();
 """
-
     result = subprocess.run(
         ["node", "-e", js_code],
-        capture_output=True,
-        text=True,
-        timeout=60,
+        capture_output=True, text=True, timeout=60
     )
-
     out = result.stdout.strip()
-    err = result.stderr.strip()
-
-    if err:
-        print(f"[stderr] {err[:200]}")
-
     if out.startswith("RESULT:"):
         raw = out[7:]
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
             return {"success": False, "error": f"JSON解析失败: {raw[:200]}"}
-    elif out.startswith("ERROR:"):
-        return {"success": False, "error": out[6:]}
+    elif "ERROR:" in out:
+        return {"success": False, "error": out}
     else:
         return {"success": False, "error": f"未知输出: {out[:200]}"}
 
 
-def extract_feishu_token(feishu_url: str) -> str:
-    """从飞书 URL 提取 token"""
-    import re
-    match = re.search(r'/([A-Za-z0-9]+)(?:\?|$)', feishu_url)
-    return match.group(1) if match else ""
+def extract_full(topic_share_url: str) -> dict:
+    """
+    从话题分享链接完整提取：分享链接 + 元数据 + 飞书链接
+
+    流程：
+    1. Playwright 导航到分享链接（自动跳转话题详情页）
+    2. 拦截 share_url API 响应
+    3. 点击「展开全部」
+    4. 提取飞书链接 + 元数据
+    """
+    js_code = f"""
+const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright');
+
+(async () => {{
+    const browser = await chromium.connectOverCDP('http://localhost:28800');
+    const ctx = browser.contexts()[0];
+    const page = ctx.pages()[0];
+
+    // 注入 share_url 拦截器
+    let shareResult = null;
+    await page.route('**/api.zsxq.com/**', async route => {{
+        const req = route.request();
+        const url = req.url();
+        if (url.includes('/topics/') && url.includes('/share_url')) {{
+            try {{
+                const resp = await route.fetch();
+                const body = await resp.json();
+                if (body.topic) {{
+                    shareResult = {{
+                        share_url: body.topic.share_url || '',
+                        topic_id: body.topic.topic_id || '',
+                        title: body.topic.text || ''
+                    }};
+                }}
+            }} catch(e) {{}}
+        }}
+        await route.continue();
+    }});
+
+    // Step 1: 导航到分享链接
+    await page.goto('{topic_share_url}', {{ waitUntil: 'networkidle', timeout: 20000 }});
+    await page.waitForTimeout(4000);
+
+    // Step 2: 获取元数据（作者/时间/标题）
+    const meta = await page.evaluate(() => {{
+        const body = document.body.innerText;
+        let author = null;
+        let dateStr = null;
+        const title = (document.title || '').replace(' -知识星球', '').trim();
+
+        // 作者：从正文匹配 "返回 {星球名} {作者} {时间}"
+        const authorMatch = body.match(/返回\\s+\\S+\\s+([^\\s（(]{1,10}?)\\s+\\d{{4}}-\\d{{2}}-\\d{{2}}/);
+        if (authorMatch) author = authorMatch[1];
+
+        // 时间
+        const timeMatch = body.match(/([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\\s+[0-9]{{2}}:[0-9]{{2}})/);
+        if (timeMatch) dateStr = timeMatch[1];
+
+        return {{ title, author, dateStr, url: window.location.href }};
+    }});
+
+    // Step 3: 点击"展开全部"
+    let expanded = false;
+    try {{
+        const btn = page.locator('text="展开全部"').first();
+        if (await btn.count() > 0) {{
+            await btn.click({{ timeout: 3000 }});
+            await page.waitForTimeout(3000);
+            expanded = true;
+        }}
+    }} catch(e) {{}}
+
+    // Step 4: 提取飞书链接
+    const feishuLinks = await page.evaluate(() => {{
+        const seen = new Set();
+        const links = [];
+        for (const a of document.querySelectorAll('a[href]')) {{
+            const href = a.href || '';
+            if (/feishu\\.cn/i.test(href)) {{
+                const clean = href.replace(/\\?.*$/, '');
+                if (!seen.has(clean)) {{
+                    seen.add(clean);
+                    links.push(clean);
+                }}
+            }}
+        }}
+        return links;
+    }});
+
+    const result = {{
+        success: true,
+        topic_id: shareResult?.topic_id || '',
+        share_url: shareResult?.share_url || meta.url,
+        title: meta.title || shareResult?.title || '',
+        author: meta.author || '',
+        date_str: meta.dateStr || '',
+        feishu_links: feishuLinks,
+        expanded: expanded
+    }};
+
+    console.log('RESULT:' + JSON.stringify(result));
+    await browser.close();
+}})();
+"""
+    result = subprocess.run(
+        ["node", "-e", js_code],
+        capture_output=True, text=True, timeout=60
+    )
+    out = result.stdout.strip()
+    if out.startswith("RESULT:"):
+        raw = out[7:]
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"success": False, "error": f"JSON解析失败: {raw[:200]}"}
+    elif "ERROR:" in out:
+        return {"success": False, "error": out}
+    else:
+        return {"success": False, "error": f"未知输出: {out[:200]}"}
 
 
 if __name__ == "__main__":
-    test_url = sys.argv[1] if len(sys.argv) > 1 else "https://t.zsxq.com/6L4Ry"
-    print(f"正在提取: {test_url}")
-    result = extract_from_share(test_url)
+    if len(sys.argv) < 2:
+        print("用法:")
+        print("  python3 extractor_share.py full <分享链接>    # 完整提取（链接+元数据+飞书链接）")
+        print("  python3 extractor_share.py id <topic_id>     # 仅获取分享链接")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    if cmd == "full":
+        url = sys.argv[2] if len(sys.argv) > 2 else "https://t.zsxq.com/6L4Ry"
+        print(f"正在完整提取: {url}")
+        result = extract_full(url)
+    elif cmd == "id":
+        tid = sys.argv[2] if len(sys.argv) > 2 else input("输入 topic_id: ")
+        print(f"正在获取分享链接: {tid}")
+        result = extract_share_url(tid)
+    else:
+        print(f"未知命令: {cmd}")
+        sys.exit(1)
+
     print(json.dumps(result, ensure_ascii=False, indent=2))
