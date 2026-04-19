@@ -1,252 +1,184 @@
----
-name: zsxq-to-feishu
-version: 1.3.0
-description: "将知识星球（ZSXQ）分享链接转化为结构化数据，自动提取标签并写入 Feishu 多维表格。触发词：拉取 ZSXQ、整理 ZSXQ 内容、ZSXQ 到飞书、知识星球内容入库。"
-metadata:
-  requires:
-    bins: ["node"]
-    scripts: ["extractor.py", "extractor_share.py", "tagger.py", "engine.py", "config.py"]
-  scriptsDir: "scripts/"
----
+# ZSXQ话题批量拉取系统
 
-# ZSXQ 精选内容拉取工具
-
-将知识星球分享链接自动整理入库的全流程技能。
-
-**飞书说明文档**：[ZSXQ精选内容拉取工具·完整说明文档](https://my.feishu.cn/wiki/Kjd1wsLXGic9iTkmETBcwKEjnOh)
-
-> ⚠️ **本文档是唯一真相来源**，代码与文档保持完全同步。
+**需求文档：https://my.feishu.cn/wiki/KomvwfEpjikGLbk6QJNc7gjAnCf**
+**本文档：https://my.feishu.cn/wiki/JkUzwkSVUiJoh5kDjKfcmpPQnQf**
+**目标储存：飞书电子表格（JmMhsCi5Bhc9dMth7QocNJPZnrh，sheet_id=70f043）**
+**代码目录：~/.qclaw/skills/zsxq-to-feishu/scripts/**
 
 ---
 
-## 目标多维表格
+## 核心踩坑（必须先读）
 
-| 字段 | 类型 | 说明 |
+### 1. ZSXQ API 无原生 share_url 字段
+
+ZSXQ Topics API 返回的 topic 数据中**没有** share_url 原生字段。分享链接格式为 `https://t.zsxq.com/{6位短码}`，需要单独从话题详情页提取。
+
+### 2. topic_id ≠ 分享短码
+
+`topic_id`（17位纯数字）不能直接拼接成分享链接，短码是另一套编码。必须通过访问话题详情页 DOM 获取。
+
+### 3. 同步 XHR 必须用 `xhr.open(..., false)`
+
+Playwright evaluate 中用 `xhr.open(..., true)`（异步）会导致回调乱序，topics 返回空数组。**必须用 `xhr.open(..., false)`（同步模式）**。
+
+### 4. Sheets API v2/v3 分工
+
+- **元信息查询**（spreadsheet/sheets query）→ v3 端点
+- **数据读写**（values read/write）→ v2 端点
+- 混用会导致 404。
+
+### 5. Chrome Remote Debugging
+
+Chrome 必须以 `--remote-debugging-port=28800` 启动，且需已登录知识星球。
+
+---
+
+## 模块清单与函数说明
+
+### 1. config.py
+
+常量配置：GROUP_ID、飞书电子表格配置（APP_ID、SPREADSHEET_TOKEN、SHEET_ID）、时间边界（STOP_TIME_PHASE1、BEGIN_TIME_PHASE2）。
+
+### 2. zsxq_api.py
+
+**核心模块**，提供 ZSXQ API 访问能力。
+
+| 函数 | 功能 | 说明 |
 |------|------|------|
-| 飞书链接 | URL | `{link, text}` 对象格式 |
-| 话题ID | 文本 | **topic_id**，约17位数字 |
-| 标题 | 文本 | 话题完整标题 |
-| 作者 | 文本 | 发布者昵称，含括号内昵称 |
-| 发布时间 | 日期 | 毫秒级时间戳 |
-| 标签 | 多选 | 2-4个，由 LLM 提取 |
-| 标签说明 | 文本 | LLM 理由说明 |
-| 链接 | 文本 | ZSXQ 分享链接 |
+| `validate_token()` | 验证 Chrome 登录态 | 拉取1条 topics 验证返回 |
+| `fetch_page(group_id, scope, count, end_time, begin_time)` | 获取单页 topics | 返回 topics 列表 |
+| `iter_topics(group_id, scope, end_time, stop_time, begin_time)` | 迭代翻页获取全部 topics | 间隔随机3~6秒 |
+| `fetch_share_urls_for_topics(topics, group_id)` | 批量获取分享链接 | asyncio 并发访问话题详情页 |
 
-**app_token**: `XpGMbvYwsaNvZMsBzZ3cN1DRnOc`
-**table_id**: `tblt1Lm7ipCFuyXi`
+**技术实现**：Playwright 连接 Chrome CDP → evaluate 中执行 XMLHttpRequest withCredentials=true → 同步模式 XHR 绕过签名验证。
+
+### 3. filter.py
+
+话题过滤器，数据清洗。
+
+| 函数 | 功能 | 说明 |
+|------|------|------|
+| `extract_feishu_links(text)` | 提取飞书链接 | 正则 `<e type="web" href>` + HTML+URL双解码 |
+| `parse_time_ms(iso_time)` | ISO时间→毫秒时间戳 | 飞书日期字段需要毫秒级 |
+| `extract_topic_data(topic, share_map)` | 提取入库字段（10列）| 无外链返回 None |
+
+**入库条件**（二选一）：有飞书链接 或 有 article_url。两者都没有 → 跳过。
+
+### 4. persistence.py
+
+SQLite 断点续传。
+
+| 函数 | 功能 |
+|------|------|
+| `is_synced(topic_id)` | 检查是否已入库 |
+| `mark_synced(topic_id, phase)` | 标记已入库（INSERT OR IGNORE）|
+| `save_checkpoint(phase, ...)` | 保存断点（last_end_time、last_topic_id、total_synced）|
+| `load_checkpoint(phase)` | 加载断点（打断恢复）|
+| `get_all_synced_ids()` | 获取全部已入库 topic_id（批量排重）|
+
+### 5. tagger.py
+
+标签提取。**由 Agent 自身大模型执行，不调用外部 API**。
+
+| 函数 | 功能 |
+|------|------|
+| `build_tag_prompt(title, content)` | 构建提示词（system_prompt + user_prompt）|
+| `tags_to_row(tags_result)` | 将标签结果转为表格格式 |
+
+**固化提示词**（SYSTEM_PROMPT）：
+- 标签由 Agent 根据文档内容自由生成，不限候选池
+- abstract_tags：1~2个宏观主题
+- functional_tags：2~4个具体工具/平台/方法
+- tag_explanations：每个标签一句话解释
+- 内容无关时：返回空数组
+
+### 6. feishu_doc_reader.py
+
+飞书文档内容获取。
+
+| 函数 | 功能 |
+|------|------|
+| `get_user_token()` | 读取 user_access_token |
+| `extract_doc_token(feishu_url)` | 从 URL 提取 doc_token |
+| `fetch_doc_content(feishu_url)` | 获取文档 raw_content（Markdown，截取前5000字）|
+
+### 7. spreadsheet_writer.py
+
+飞书电子表格写入（已实测验证 ✅）。
+
+| 函数 | 功能 |
+|------|------|
+| `get_tenant_token()` | 获取 tenant_access_token（缓存，TTL=7200秒）|
+| `row_to_values(data)` | topic data → 10列表格行 |
+| `batch_write_rows(rows, start_row)` | 批量写入（PUT values API）|
+| `get_last_row()` | 查询最后有数据的行号 |
+| `test_connection()` | 验证写入连通性 |
+
+### 8. engine.py
+
+主流程调度器。
+
+| 函数 | 功能 |
+|------|------|
+| `run_phase(phase, scope, end_time, stop_time, begin_time)` | 执行单个阶段 |
+| `main()` | CLI 入口，解析命令行参数 |
+
+**执行步骤**：
+1. 加载断点（如有）
+2. `iter_topics()` 拉取 topics
+3. `fetch_share_urls_for_topics()` 批量获取分享链接
+4. 过滤 + 排重
+5. 标签提取（Agent 大模型，仅有飞书链接的话题）
+6. 写入电子表格
+7. 保存断点
+
+**CLI 用法**：
+```
+python engine.py verify  # 验证 Token + 电子表格
+python engine.py test    # 测试模式（20条）
+python engine.py phase1  # 24年精华（digests，翻到2024-01-01停止）
+python engine.py phase2  # 25年至今（all）
+python engine.py phase3  # 每周增量（上周一~本周一）
+```
+
+### agent_llm_infer() 占位函数
+
+在 engine.py 中由 Agent 自身大模型替换实现。Agent 将 `build_tag_prompt()` 返回的 system_prompt + user_prompt 注入自身推理，返回 JSON 标签结果。
 
 ---
 
-## 完整执行流程
+## 三个执行阶段
 
-### 阶段零：Chrome 检查
-
-**Chrome 必须开启 Remote Debugging**：
-```bash
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=28800
-```
-
-### 阶段一：提取 ZSXQ 数据
-
-**单条分享链接（已知 `t.zsxq.com` 链接）**：
-```bash
-cd ~/.qclaw/skills/zsxq-to-feishu/scripts
-python3 engine.py "https://t.zsxq.com/6L4Ry"
-```
-
-**批量精华话题列表（推荐，新方案）**：
-直接从星球 API 拉取精华话题，从正文提取飞书链接：
-
-```python
-# 技术方案：Playwright XHR 拦截（绕过 ZSXQ X-Signature 签名验证）
-# 原理：XMLHttpRequest 的 withCredentials=true 自动携带完整 cookie session
-import subprocess, json, re
-from html import unescape
-
-def fetch_topics_xhr(group_id: str = "15552545485212", count: int = 20) -> list[dict]:
-    js = """
-const {chromium} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright');
-(async () => {
-    const browser = await chromium.connectOverCDP('http://localhost:28800');
-    const ctx = browser.contexts()[0];
-    const page = await ctx.newPage();  // ⚠️ 必须用 newPage()，不能用 pages()[0]（会 detach！）
-    await page.goto('https://wx.zsxq.com/group/""" + group_id + """', {waitUntil:'domcontentloaded', timeout:15000});
-    await page.waitForTimeout(3000);
-    const r = await page.evaluate(async () => new Promise(resolve => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', 'https://api.zsxq.com/v2/groups/""" + group_id + """/topics?scope=digests&count=20', true);
-        xhr.withCredentials = true;
-        xhr.setRequestHeader('Accept', 'application/json');
-        xhr.onload = () => { try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({error:e.message}); } };
-        xhr.send();
-    }));
-    console.log('DATA:' + JSON.stringify(r?.resp_data?.topics || []));
-    await browser.close();
-})().catch(e => { console.error('ERROR:'+e.message); process.exit(1); });
-"""
-    result = subprocess.run(['node', '-e', js], capture_output=True, text=True, timeout=60)
-    topics = json.loads(result.stdout.split('DATA:')[1]) if 'DATA:' in result.stdout else []
-    return [{'topic_id': t['topic_id'], 'type': t['type'],
-             'author': t.get('talk',{}).get('owner',{}).get('name','') or t.get('question',{}).get('owner',{}).get('name',''),
-             'text': t.get('talk',{}).get('text','') or t.get('question',{}).get('text','') or '',
-             'create_time': t.get('create_time','')}
-            for t in topics]
-
-# 提取飞书链接
-def extract_feishu_links(text: str) -> list[str]:
-    text = unescape(text)
-    import urllib.parse
-    try: text = urllib.parse.unquote(text)
-    except: pass
-    return list(set(re.findall(r'https://my\.feishu\.cn/(?:wiki|docx)/[a-zA-Z0-9]+', text)))
-
-# 使用
-topics = fetch_topics_xhr("15552545485212", 20)
-records = [{'title': t['text'][:80].split(chr(10))[0], 'author': t['author'],
-            'feishu_link': extract_feishu_links(t['text'])[0],
-            'topic_id': t['topic_id'], 'create_time': t['create_time']}
-           for t in topics if extract_feishu_links(t['text'])]
-# records → feishu_bitable_create_record
-```
-
-**提取数据格式**：
-```python
-{
-    "success": True,
-    "feishu_link": "https://my.feishu.cn/wiki/xxx",
-    "title": "话题标题",
-    "author": "陈行之（皮特）",
-    "date_str": "2026-04-15 20:28",
-    "zsxq_url": "https://wx.zsxq.com/group/xxx/topic/xxx",
-    "zsxq_topic_id": "45544844845444248",
-    "zsxq_token": "feishu_token",  # 用于 feishu_doc 读取
-}
-```
-
-**作者提取**：找 `返回 {星球}` 行，下一行即为作者行。自动清理回复标记如 `回复 xxx`。
+| 阶段 | scope | 边界条件 | 说明 |
+|------|-------|---------|------|
+| Phase 1 | digests | stop_time=2024-01-01 | 24年及之前精华，从新到旧翻页 |
+| Phase 2 | all | begin_time=2025-01-01 | 25年至今全量，跳过 Phase1 已处理的 |
+| Phase 3 | all | begin_time=上周一，end_time=本周一 | 每周增量 |
 
 ---
 
-### 阶段一附：获取话题分享链接
-
-**星球 group_id：**
-- AI破局俱乐部：`15552545485212`
-
-**方式A — 已知 topic_id，获取分享链接**
-
-```python
-from extractor_share import extract_share_url
-result = extract_share_url("45544844845444248", group_id="15552545485212")
-# → {"share_url": "https://t.zsxq.com/xxxx", "topic_id": "...", "title": "..."}
-```
-
-**方式B — 已知分享链接，完整提取元数据 + 飞书链接**
-
-```python
-from extractor_share import extract_full
-result = extract_full("https://t.zsxq.com/XXXX")
-# → {"share_url", "topic_id", "title", "author", "date_str", "feishu_links": []}
-```
-
-**如何获取 topic_id：**
-打开 ZSXQ 星球话题页 → Chrome DevTools → Network → 筛选 `/topics/` 请求 → 响应 body 中含 `topic_id`（约17位数字）
-
----
-
-### 阶段二：读取飞书文档
-
-Agent 调用 `feishu_doc` 读取正文（截取前4000字传给 tagger）：
-```
-feishu_doc(action="read", doc_token="QVtCw3sIji9qNvkEEjWckpB8ncq")
-```
-
----
-
-### 阶段三：LLM 提取标签
-
-Agent 用 `tagger.py` 的 `build_llm_prompt()` 生成提示词，直接用自己（本身就是 LLM）回答：
-
-```python
-from tagger import build_llm_prompt, parse_llm_response, format_record_tags
-
-llm_prompt = build_llm_prompt(feishu_content, title)
-# Agent 将提示词发给自己（LLM）提取标签
-# 解析 LLM 回复
-tag_result = parse_llm_response(llm_response)
-# tag_result: {"tags": [...], "tag_desc": "..."}
-```
-
-参考标签（可直接使用）：`写作、提示词、智能体、获客、自媒体、AI研究、编程开发、效率工具、学习教育`
-
-输出格式（只需 JSON）：`{"tags": ["标签1", "标签2"], "reason": "简短说明"}`
-
----
-
-### 阶段四：写入多维表格
-
-```python
-feishu_bitable_create_record(
-    app_token="XpGMbvYwsaNvZMsBzZ3cN1DRnOc",
-    table_id="tblt1Lm7ipCFuyXi",
-    fields={
-        "飞书链接": {"link": "https://my.feishu.cn/wiki/xxx", "text": "标题"},
-        "话题ID": "45544844845444248",
-        "标题": "完整标题",
-        "作者": "陈行之（皮特）",
-        "发布时间": 1776256080000,          # 毫秒级时间戳
-        "标签": ["写作", "智能体"],
-        "标签说明": "标签1 / 标签2 理由说明",
-        "链接": "https://t.zsxq.com/XXXX"
-    }
-)
-```
-
-**时间戳计算**：
-```python
-from datetime import datetime, timezone, timedelta
-cst = timezone(timedelta(hours=8))
-dt = datetime(2026, 4, 9, 14, 38, 0, tzinfo=cst)
-int(dt.timestamp() * 1000)  # → 1775716680000
-```
-
----
-
-## 踩坑点速查
+## 踩坑记录
 
 | # | 坑 | 原因 | 解决方案 |
 |---|-----|------|---------|
-| 1 | 作者提取为空 | 作者行在换行后，正则按空格匹配失败 | 按行解析：`lines[i+1]` |
-| 2 | 飞书链接写入报 URLFieldConvFail | 传了纯字符串 | 用 `{link, text}` 对象格式 |
-| 3 | MultiSelect 报错 | 新标签值报错 | 直接写字符串，Feishu 自动创建选项 |
-| 4 | DateTime 显示 1970/2038 | 传了秒级时间戳 | `int(dt.timestamp() * 1000)` |
-| 5 | ZSXQ 跳转登录页 | 无头浏览器无登录态 | CDP 模式连接本地 Chrome |
-| 6 | `split('\n')` Node.js 语法错误 | Python 把 `\n` 写成了实际换行符 | 写 `split('\\n')` 传递字面 `\n` |
-| 7 | **`Frame has been detached` SIGTERM** | `ctx.pages()[0]` 对已关闭的 tab 操作 | **必须用 `await ctx.newPage()` 创建新 page** |
-| 8 | **topics API 返回 401 / "需要星主同意"** | MCP Bearer token 无法访问星球接口 | 用 Playwright XHR + `withCredentials=true` 绕过签名验证 |
+| 1 | topics API 返回"需要星主同意" | Bearer Token 权限不足 | Playwright XHR + withCredentials=true |
+| 2 | topics 返回空数组 | 异步 XHR 回调乱序 | `xhr.open(..., false)` 同步模式 |
+| 3 | `Frame has been detached` SIGTERM | `ctx.pages()[0]` 对已关闭tab操作 | `ctx.newPage()` |
+| 4 | 飞书链接提取失败 | 链接藏在 `<e type="web" href>` 属性里 | HTML+URL双解码正则 |
+| 5 | DateTime 显示 1970 | 秒级时间戳给飞书 | `int(dt.timestamp() * 1000)` 毫秒级 |
+| 6 | Sheets API 404 | 元信息用了 v2 端点 | 元信息：v3，数据读写：v2 |
+| 7 | ZSXQ 无原生 share_url | API 本身不返回 | 访问话题详情页提取 |
 
 ---
 
-## 文件结构
+## 待办清单
 
-```
-zsxq-to-feishu/
-├── SKILL.md              ← 本文件，唯一真相来源
-└── scripts/
-    ├── config.py         ← 常量 + 时间戳计算 + 字段名
-    ├── extractor.py      ← ZSXQ 单条分享链接提取（Playwright CDP）
-    ├── extractor_share.py← ZSXQ topic_id→分享链接提取（CDP + Playwright，备用）
-    ├── test_group_extract.py  ← 批量精华话题提取（测试用）
-    ├── tagger.py         ← LLM 标签提取提示词生成
-    └── engine.py         ← 主流程编排（单条）
-```
-
-**批量精华话题提取**（推荐）：直接调用 ZSXQ topics API → 正则提取飞书链接 → 写多维表格。参考 `SKILL.md` 阶段一"批量精华话题列表"章节。
-
----
-
-## 触发词
-
-- "拉取 ZSXQ" / "整理 ZSXQ" / "ZSXQ 到飞书"
-- "知识星球内容入库" / "抓取 ZSXQ 内容"
-- 发送 ZSXQ 分享链接（自动识别处理）
-��处理）
+| # | 待办 | 责任方 | 状态 |
+|---|------|--------|------|
+| 1 | Chrome 开启 Remote Debugging（端口28800） | 用户 | ⏳ 待确认 |
+| 2 | Chrome 已登录知识星球 | 用户 | ⏳ 待确认 |
+| 3 | 验证 ZSXQ Token（`python engine.py verify`） | Agent | ⏳ ①②后执行 |
+| 4 | Phase 1 试跑（20条验证全链路） | Agent | ⏳ ③通过后 |
+| 5 | Phase 1 全量拉取 | Agent | ⏳ 试跑后 |
+| 6 | Phase 2 全量拉取 | Agent | ⏳ Phase1后 |
+| 7 | Phase 3 定时任务 | Agent | ⏳ Phase2后 |

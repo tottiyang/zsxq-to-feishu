@@ -1,39 +1,21 @@
-# -*- coding: utf-8 -*-
 """
-配置常量
+config.py — ZSXQ话题拉取系统常量配置
 """
 
-from datetime import datetime, timezone, timedelta
+GROUP_ID = "15552545485212"
+ZSXQ_URL = "https://wx.zsxq.com/group/15552545485212"
+CHROME_DEBUG_PORT = 28800
+PLAYWRIGHT_MODULE = "/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright"
 
+FEISHU_APP_ID = "cli_a95e368b8cf89bc4"
+FEISHU_APP_SECRET = "3Y5LRpcDnAo8XEip4zv9fhIARz6HwtEO"
+SPREADSHEET_TOKEN = "JmMhsCi5Bhc9dMth7QocNJPZnrh"
+SHEET_ID = "70f043"
 
-# ============================================================
-# 多维表格（AI破局俱乐部·精选内容库）
-# ============================================================
-BITABLE_APP_TOKEN = "XpGMbvYwsaNvZMsBzZ3cN1DRnOc"
-BITABLE_TABLE_ID = "tblt1Lm7ipCFuyXi"
+COLUMNS = [
+    "飞书链接", "文章地址", "话题ID", "标题",
+    "作者", "发布时间", "链接", "是否精华", "标签", "标签说明"
+]
 
-# ============================================================
-# 字段名常量（与多维表格列名一致）
-# ============================================================
-FIELD_FEISHU_LINK = "飞书链接"
-FIELD_TOPIC_ID = "话题ID"
-FIELD_TITLE = "标题"
-FIELD_AUTHOR = "作者"
-FIELD_PUBLISH_TIME = "发布时间"
-FIELD_TAGS = "标签"
-FIELD_TAG_DESC = "标签说明"
-FIELD_LINK = "链接"
-
-
-# ============================================================
-# 时间戳计算
-# ============================================================
-
-def str_to_ms(date_str: str) -> int:
-    """
-    将 'YYYY-MM-DD HH:mm' 转换为毫秒级时间戳（北京时间）
-    """
-    cst = timezone(timedelta(hours=8))
-    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-    dt = dt.replace(tzinfo=cst)
-    return int(dt.timestamp() * 1000)
+STOP_TIME_PHASE1 = "2024-01-01T00:00:00+0800"
+BEGIN_TIME_PHASE2 = "2025-01-01T00:00:00+0800"
