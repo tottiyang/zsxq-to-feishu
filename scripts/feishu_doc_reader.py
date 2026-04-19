@@ -1,5 +1,6 @@
 """feishu_doc_reader.py — 飞书文档内容获取"""
 import json, re, urllib.request
+from typing import Optional
 FEISHU_USER_TOKEN_PATH = "~/.qclaw/skills-config/feishu/tokens/user_token.json"
 
 def get_user_token() -> str:
@@ -7,9 +8,25 @@ def get_user_token() -> str:
         d = json.load(f)
     return d.get("access_token", "")
 
-def extract_doc_token(feishu_url: str) -> str | None:
+def extract_doc_token(feishu_url: str) -> Optional[str]:
     m = re.search(r'(?:wiki|docx)/([a-zA-Z0-9]+)', feishu_url)
     return m.group(1) if m else None
+
+def extract_doc_title(feishu_url: str) -> str:
+    """获取飞书文档标题"""
+    doc_token = extract_doc_token(feishu_url)
+    if not doc_token:
+        return ""
+    token = get_user_token()
+    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_token}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result.get("data", {}).get("title", "") or ""
+    except Exception as e:
+        print(f"飞书文档标题获取失败 {feishu_url}: {e}")
+        return ""
 
 def fetch_doc_content(feishu_url: str) -> str:
     doc_token = extract_doc_token(feishu_url)

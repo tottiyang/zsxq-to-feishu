@@ -18,6 +18,7 @@ filter.py — 话题过滤器
 """
 
 import re, html, urllib.parse
+from typing import Optional
 from datetime import datetime
 
 WEB_TAG_RE = re.compile(r'<e\s+type="web"\s+href="([^"]+)"', re.IGNORECASE)
@@ -38,15 +39,15 @@ def extract_feishu_links(text: str) -> list[str]:
     return [u for u in decoded if 'feishu.cn' in u or 'larksuite' in u]
 
 
-def parse_time_ms(iso_time: str) -> int:
-    """ISO 时间字符串 → 毫秒时间戳"""
+def parse_time_str(iso_time: str) -> str:
+    """ISO 时间字符串 → 'YYYY-MM-DD HH:MM' 格式"""
     if not iso_time:
-        return 0
+        return ""
     dt = datetime.fromisoformat(iso_time.replace('+0800', '+08:00'))
-    return int(dt.timestamp() * 1000)
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
-def extract_topic_data(topic: dict, share_map: dict = None) -> dict | None:
+def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
     """
     从单条 topic 提取入库数据
 
@@ -55,7 +56,11 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> dict | None:
         share_map: {topic_id: share_url}，由 zsxq_api.fetch_share_urls_for_topics() 生成
 
     Returns:
-        dict: 入库字段（10列）| None: 无外链，跳过
+        dict: 入库字段 | None: 无外链，跳过
+
+    标题逻辑（needs_title_from_feishu 标记）:
+        有飞书链接 → title=zsxq原始标题（待 engine.py 调用飞书API后替换）
+        无飞书链接 → title=zsxq原始标题（直接入库）
     """
     topic_type = topic.get("type", "talk")
 
@@ -103,8 +108,9 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> dict | None:
         "title": clean_title,
         "author": author,
         "create_time": topic.get("create_time", "") or "",
-        "create_time_ms": parse_time_ms(topic.get("create_time", "")),
+        "create_time_str": parse_time_str(topic.get("create_time", "")),
         "share_url": share_url,
         "is_digest": "是" if topic.get("digested") else "否",
+        "needs_title_from_feishu": bool(feishu_url),   # 有飞书链接 → 标题取自文档
         "needs_tags": bool(feishu_url),
     }

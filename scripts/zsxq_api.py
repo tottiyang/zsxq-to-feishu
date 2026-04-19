@@ -70,33 +70,6 @@ const {{chromium}} = require('{PLAYWRIGHT_MODULE}');
         return {"error": f"parse error", "topics": []}
 
 
-def _build_share_js(topic_id: str, group_id: str) -> str:
-    return f"""
-const {{chromium}} = require('{PLAYWRIGHT_MODULE}');
-(async () => {{
-    const browser = await chromium.connectOverCDP('http://localhost:28800');
-    const ctx = browser.contexts()[0];
-    const page = await ctx.newPage();
-    await page.goto('https://wx.zsxq.com/topics/{topic_id}?group_id={group_id}', {{
-        waitUntil: 'domcontentloaded', timeout: 15000
-    }});
-    await page.waitForTimeout(2000);
-    const shareUrl = await page.evaluate(() => {{
-        const btns = Array.from(document.querySelectorAll('button, a'));
-        for (const el of btns) {{
-            const t = (el.textContent||'').trim();
-            if (t === '分享' || t === '复制链接') {{
-                const href = el.getAttribute('href');
-                if (href && href.includes('t.zsxq.com')) return href;
-            }}
-        }}
-        return window.location.href;
-    }});
-    console.log('SHARE_URL:' + shareUrl);
-    await browser.close();
-}})().catch(e => {{ console.error('ERROR:'+e.message); process.exit(1); }});
-"""
-
 
 def validate_token() -> bool:
     """验证 Chrome 登录态（获取1条 topics 验证）"""
@@ -167,6 +140,100 @@ def iter_topics(group_id: str, scope: str,
 def fetch_share_urls_for_topics(topics: list, group_id: str) -> dict:
     """
     为话题列表批量获取分享链接（asyncio 并发）
+
+    Args:
+        topics: topics 列表
+        group_id: 星球ID
+
+    Returns:
+        dict: {topic_id: share_url}
+    """
+    topic_ids = [str(t["topic_id"]) for t in topics]
+    return asyncio.run(_fetch_share_urls_async(topic_ids, group_id))
+
+
+async def _fetch_share_url_async(topic_id: str, group_id: str) -> tuple[str, str]:
+    """异步获取单个话题的分享链接
+
+    技术方案：
+    1. Playwright page.route() 拦截 GET /topics/{id}/share_url API
+    2. 导航到话题详情页（此时 share URL API 尚未调用）
+    3. 模拟点击 .talk-content-container 内的 .p.ellipsis 按钮
+    4. 拦截 API 响应，提取 share_url 字段
+    """
+    js = f"""
+const {{chromium}} = require('{PLAYWRIGHT_MODULE}');
+(async () => {{
+    const browser = await chromium.connectOverCDP('http://localhost:28800');
+    const ctx = browser.contexts()[0];
+    const page = await ctx.newPage();
+
+    let captured = '';
+    const topicId = '{topic_id}';
+
+    // 拦截 share_url API
+    await page.route(\`**/api.zsxq.com/v2/topics/{{topicId}}/share_url**\`, async (route) => {{
+        try {{
+            const resp = await route.fetch();
+            const json = await resp.json();
+            captured = json?.resp_data?.share_url || '';
+        }} catch(e) {{}}
+        await route.continue();
+    }});
+
+    await page.goto('https://wx.zsxq.com/topics/' + topicId + '?group_id={group_id}', {{
+        waitUntil: 'domcontentloaded', timeout: 15000
+    }});
+    await page.waitForTimeout(1500);
+
+    // 点击三个点按钮
+    try {{
+        const ellipsis = await page.locator('.p.ellipsis').first();
+        if (await ellipsis.isVisible()) {{
+            await ellipsis.click();
+            await page.waitForTimeout(2000);
+        }}
+    }} catch(e) {{}}
+
+    console.log('SHARE_URL:' + captured);
+    await browser.close();
+}})().catch(e => {{ console.error('ERROR:'+e.message); process.exit(1); }});
+"""
+    proc = await asyncio.create_subprocess_exec(
+        'node', '-e', js,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    out = stdout.decode()
+    if 'SHARE_URL:' in out:
+        url = out.split('SHARE_URL:')[1].strip()
+        return topic_id, url
+    return topic_id, ""
+
+
+async def _fetch_share_urls_async(topic_ids: list, group_id: str, max_concurrency: int = 5) -> dict:
+    """asyncio 并发拉取分享链接（信号量控制并发数）"""
+    sem = asyncio.Semaphore(max_concurrency)
+    results = {}
+
+    async def _fetch_one(tid: str):
+        async with sem:
+            tid, url = await _fetch_share_url_async(tid, group_id)
+            results[tid] = url
+
+    await asyncio.gather(*[_fetch_one(tid) for tid in topic_ids])
+    return results
+
+
+def fetch_share_urls_for_topics(topics: list, group_id: str) -> dict:
+    """
+    为话题列表批量获取分享链接（asyncio 并发）
+
+    技术方案：
+    - Playwright page.route() 拦截 GET /topics/{id}/share_url API
+    - 导航到话题详情页后，模拟点击 .talk-content-container 内的 .p.ellipsis 按钮
+    - 拦截 API 响应，提取 share_url 字段
 
     Args:
         topics: topics 列表

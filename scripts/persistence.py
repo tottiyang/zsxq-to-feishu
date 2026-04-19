@@ -1,5 +1,6 @@
 """persistence.py — SQLite 断点续传"""
 import sqlite3
+from typing import Optional
 from datetime import datetime
 
 class SyncState:
@@ -24,7 +25,7 @@ class SyncState:
         self.db.commit()
         print(f"  ✓ 断点已保存: phase={phase}, total={total_synced}, last_time={last_end_time[:19]}")
 
-    def load_checkpoint(self, phase: str) -> dict | None:
+    def load_checkpoint(self, phase: str) -> Optional[dict]:
         cur = self.db.execute("SELECT last_end_time, last_topic_id, total_synced FROM sync_checkpoint WHERE phase=?", (phase,))
         row = cur.fetchone()
         if row:

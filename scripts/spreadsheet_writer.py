@@ -31,7 +31,7 @@ def row_to_values(data: dict) -> list:
         data.get("topic_id", ""),
         data.get("title", ""),
         data.get("author", ""),
-        data.get("create_time_ms", 0),
+        data.get("create_time_str", ""),   # 格式: "2026-04-15 12:20"
         data.get("share_url", ""),
         data.get("is_digest", "否"),
         data.get("tags_str", ""),
