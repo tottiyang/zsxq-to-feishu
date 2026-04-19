@@ -34,6 +34,8 @@ def row_to_values(data: dict) -> list:
         data.get("create_time_str", ""),   # 格式: "2026-04-15 12:20"
         data.get("share_url", ""),
         data.get("is_digest", "否"),
+        data.get("tags_str", ""),
+        data.get("tag_notes", "{}"),
     ]
 
 def batch_write_rows(rows: list[list], start_row: int = 2) -> dict:
@@ -67,10 +69,11 @@ def test_connection():
     test_row = [
         "https://my.feishu.cn/wiki/test", "https://articles.zsxq.com/test.html",
         "TEST_ID", "测试标题", "测试作者",
-        "2026-04-19 12:00", "https://t.zsxq.com/TEST", "否"
+        "2026-04-19 12:00", "https://t.zsxq.com/TEST", "否",
+        "AI编程,实战", '{"AI编程": "核心主题"}'
     ]
     result = batch_write_rows([test_row], start_row=2)
     print(f"写入: code={result.get('code')}, updatedCells={result.get('data',{}).get('updatedCells')}")
-    cleanup = batch_write_rows([[None]*8], start_row=2)
+    cleanup = batch_write_rows([[None]*10], start_row=2)
     print(f"清理: code={cleanup.get('code')}")
     print("✓ 验证完成")

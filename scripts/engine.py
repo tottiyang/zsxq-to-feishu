@@ -124,9 +124,28 @@ def run_phase(phase: str, scope: str,
             skipped_title_fail += 1
             continue
 
-        # 6. 写入表格（I/J 列标签为空，兼容旧数据）
-        data["tags_str"] = ""
-        data["tag_notes"] = "{}"
+        # 6. 标签生成（仅飞书链接话题）
+        if data.get("feishu_url"):
+            try:
+                content = fetch_doc_content(data["feishu_url"])
+                if content:
+                    title_for_tag = data.get("title") or "无标题"
+                    sys_p, usr_p = build_tag_prompt(title_for_tag, content)
+                    tags_result = agent_llm_infer(sys_p, usr_p)
+                    data["tags_str"], data["tag_notes"] = tags_to_row(tags_result)
+                    print(f"  [{i+1}/{total_topics}] 标签: {data['tags_str'][:30]}")
+                else:
+                    data["tags_str"] = ""
+                    data["tag_notes"] = "{}"
+            except Exception as e:
+                print(f"  标签生成异常: {e}，设为空")
+                data["tags_str"] = ""
+                data["tag_notes"] = "{}"
+        else:
+            data["tags_str"] = ""
+            data["tag_notes"] = "{}"
+
+        # 7. 写入表格
         row = row_to_values(data)
         to_write.append(row)
         state.mark_synced(tid, phase)
@@ -134,14 +153,14 @@ def run_phase(phase: str, scope: str,
     print(f"\n  统计: 入库 {len(to_write)} 条, 重复跳过 {skipped_dupe} 条, "
           f"无链接跳过 {skipped_no_link} 条, 标题失败跳过 {skipped_title_fail} 条")
 
-    # 7. 写入电子表格
+    # 8. 写入电子表格
     if to_write:
         last_row = get_last_row()
         result = batch_write_rows(to_write, start_row=last_row + 1)
         print(f"  写入: code={result.get('code')}, "
               f"updatedCells={result.get('data',{}).get('updatedCells')}")
 
-    # 8. 保存断点
+    # 9. 保存断点
     if topics:
         state.save_checkpoint(phase,
             last_end_time=topics[-1]["create_time"],
@@ -277,7 +296,8 @@ if __name__ == "__main__":
 def agent_llm_infer(system_prompt: str, user_prompt: str) -> dict:
     """
     占位函数，由 Agent 自身大模型执行推理。
-    Agent 将 system_prompt + user_prompt 注入自身大模型，返回 JSON 标题结果。
-    固化提示词见 tagger.py build_title_prompt()。
+    Agent 将 system_prompt + user_prompt 注入自身大模型，返回 JSON 结果。
+    标题生成：tagger.py build_title_prompt()
+    标签生成：tagger.py build_tag_prompt()
     """
     raise NotImplementedError("此函数由 Agent 执行时替换实现")
