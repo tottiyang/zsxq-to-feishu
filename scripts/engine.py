@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import GROUP_ID, STOP_TIME_PHASE1, BEGIN_TIME_PHASE2
 from zsxq_api import iter_topics, validate_token, fetch_page, fetch_share_urls_for_topics
 from filter import extract_topic_data
-from feishu_doc_reader import extract_doc_title
-from tagger import build_title_prompt, parse_title_result
+from feishu_doc_reader import extract_doc_title, fetch_doc_content
+from tagger import build_title_prompt, parse_title_result, build_tag_prompt, tags_to_row
 from spreadsheet_writer import batch_write_rows, row_to_values, get_last_row, test_connection
 from persistence import SyncState
 
@@ -177,9 +177,93 @@ def main():
                   begin_time=last_monday.strftime("%Y-%m-%dT00:00:00+0800"))
 
     elif phase == "verify":
-        print("验证模式")
-        assert validate_token(), "ZSXQ Token 验证失败"
+        print("=" * 50)
+        print("验证模式：逐项验证全链路")
+        print("=" * 50)
+
+        # ① ZSXQ Token
+        print("\n① 验证 ZSXQ Token...")
+        assert validate_token(), "❌ ZSXQ Token 验证失败"
+        print("✅ ZSXQ Token 正常")
+
+        # ② 拉取1条真实话题
+        print("\n② 拉取真实话题数据...")
+        topics = fetch_page(GROUP_ID, "digests", 1)
+        assert topics, "❌ 无法拉取 topics"
+        topic = topics[0]
+        print(f"✅ 拉取成功: topic_id={topic['topic_id']}")
+
+        # 预定义变量（某些分支可能不执行）
+        doc_title = None
+        generated = ""
+        tags_str = ""
+        tag_notes = "{}"
+
+        # ③ 飞书文档标题获取（有飞书链接的话题）
+        print("\n③ 验证飞书文档标题获取...")
+        share_map = fetch_share_urls_for_topics(topics, GROUP_ID)
+        data = extract_topic_data(topic, share_map)
+        assert data, "❌ extract_topic_data 返回空（无外链）"
+        doc_title = None
+        if data.get("feishu_url"):
+            doc_title = extract_doc_title(data["feishu_url"])
+            print(f"✅ 飞书文档标题: {doc_title[:50] if doc_title else '(空)'}")
+        else:
+            print("⚠️ 本条无飞书链接，跳过标题获取测试")
+
+        # ④ Agent 大模型标题生成
+        print("\n④ 验证 Agent 标题生成...")
+        if data.get("clean_text"):
+            sys_p, usr_p = build_title_prompt(data["clean_text"])
+            result = agent_llm_infer(sys_p, usr_p)
+            generated = parse_title_result(result)
+            assert generated, "❌ 标题生成为空"
+            print(f"✅ 标题生成成功: {generated[:40]}")
+        else:
+            print("⚠️ 本条无正文，跳过标题生成测试")
+
+        # ⑤ Agent 大模型标签生成（仅飞书链接话题）
+        print("\n⑤ 验证 Agent 标签生成（有飞书链接）...")
+        if data.get("feishu_url"):
+            content = fetch_doc_content(data["feishu_url"])
+            if content:
+                title_for_tag = doc_title or data.get("title") or "无标题"
+                sys_p, usr_p = build_tag_prompt(title_for_tag, content)
+                tags_result = agent_llm_infer(sys_p, usr_p)
+                tags_str, tag_notes = tags_to_row(tags_result)
+                print(f"✅ 标签生成成功: {tags_str or '(空)'}")
+            else:
+                print("⚠️ 文档内容为空，跳过标签测试")
+        else:
+            print("⚠️ 本条无飞书链接，跳过标签测试")
+
+        # ⑥ Feishu 表格写入
+        print("\n⑥ 验证 Feishu 表格写入...")
         test_connection()
+        print("✅ 表格写入连通性正常")
+
+        # ⑦ 模拟写入一行（verify 用虚拟数据）
+        test_data = {
+            "feishu_url": data.get("feishu_url", ""),
+            "article_url": data.get("article_url", ""),
+            "topic_id": data["topic_id"],
+            "title": data.get("title") or generated or "验证标题",
+            "author": data.get("author", ""),
+            "create_time": data.get("create_time", ""),
+            "create_time_str": data.get("create_time_str", ""),
+            "share_url": data.get("share_url", ""),
+            "is_digest": data.get("is_digest", "否"),
+            "tags_str": tags_str if data.get("feishu_url") else "",
+            "tag_notes": tag_notes if data.get("feishu_url") else "{}",
+        }
+        row = row_to_values(test_data)
+        result = batch_write_rows([row], start_row=get_last_row() + 1)
+        assert result.get("code") == 0, f"❌ 表格写入失败: {result}"
+        print(f"✅ 模拟写入成功: updatedCells={result.get('data',{}).get('updatedCells')}")
+
+        print("\n" + "=" * 50)
+        print("🎉 全链路验证通过！")
+        print("=" * 50)
 
     else:
         print(f"未知阶段: {phase}")
