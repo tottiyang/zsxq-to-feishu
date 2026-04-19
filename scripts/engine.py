@@ -174,9 +174,82 @@ def main():
     phase = sys.argv[1] if len(sys.argv) > 1 else "test"
 
     if phase == "test":
-        print("测试模式：拉取20条验证全链路")
+        print("=" * 50)
+        print("测试模式：20条全类型话题跑全链路")
+        print("=" * 50)
+
+        # ① 拉取20条（混合精华+非精华）
         topics = fetch_page(GROUP_ID, "digests", 20)
-        print(f"获取 {len(topics)} 条 topics")
+        print(f"\n① 获取 {len(topics)} 条 topics")
+
+        # ② 获取分享链接
+        share_map = fetch_share_urls_for_topics(topics, GROUP_ID)
+        print(f"② 分享链接获取完成：{sum(1 for v in share_map.values() if v)} 条有效")
+
+        # ③ 过滤+标题+标签
+        state = SyncState()
+        to_write = []
+        for i, topic in enumerate(topics):
+            tid = str(topic["topic_id"])
+            data = extract_topic_data(topic, share_map)
+            if not data:
+                print(f"③ [{i+1}/{len(topics)}] {tid} 无外链，跳过")
+                continue
+
+            # 标题
+            title_ok = False
+            if data.get("feishu_url"):
+                doc_title = extract_doc_title(data["feishu_url"])
+                if doc_title:
+                    data["title"] = doc_title
+                    print(f"③ [{i+1}/{len(topics)}] 飞书标题: {doc_title[:35]}")
+                    title_ok = True
+            if not title_ok and data.get("clean_text"):
+                try:
+                    sys_p, usr_p = build_title_prompt(data["clean_text"])
+                    result = agent_llm_infer(sys_p, usr_p)
+                    data["title"] = parse_title_result(result) or f"无标题_{tid[-6:]}"
+                    print(f"③ [{i+1}/{len(topics)}] 总结标题: {data['title'][:35]}")
+                    title_ok = True
+                    time.sleep(random.uniform(0.5, 1.5))
+                except Exception as e:
+                    print(f"    标题异常: {e}，设为默认标题")
+                    data["title"] = f"无标题_{tid[-6:]}"
+                    title_ok = True
+            if not title_ok:
+                data["title"] = f"无标题_{tid[-6:]}"
+
+            # 标签（仅飞书链接）
+            if data.get("feishu_url"):
+                try:
+                    content = fetch_doc_content(data["feishu_url"])
+                    if content:
+                        sys_p, usr_p = build_tag_prompt(data["title"], content)
+                        tags_result = agent_llm_infer(sys_p, usr_p)
+                        data["tags_str"], data["tag_notes"] = tags_to_row(tags_result)
+                        print(f"    标签: {data['tags_str'][:30]}")
+                        time.sleep(random.uniform(0.5, 1.5))
+                    else:
+                        data["tags_str"] = ""
+                        data["tag_notes"] = "{}"
+                except Exception as e:
+                    print(f"    标签异常: {e}")
+                    data["tags_str"] = ""
+                    data["tag_notes"] = "{}"
+            else:
+                data["tags_str"] = ""
+                data["tag_notes"] = "{}"
+
+            to_write.append(row_to_values(data))
+            print(f"    ✓ [{i+1}/{len(topics)}] 话题ID={tid}")
+
+        # ④ 写入表格
+        if to_write:
+            print(f"\n④ 准备写入 {len(to_write)} 条...")
+            last_row = get_last_row()
+            result = batch_write_rows(to_write, start_row=last_row + 1)
+            print(f"    code={result.get('code')}, updatedCells={result.get('data',{}).get('updatedCells')}")
+        print(f"\n🎉 测试完成，共入库 {len(to_write)} 条")
 
     elif phase == "phase1":
         run_phase(phase="phase1_digests_2024", scope="digests",
