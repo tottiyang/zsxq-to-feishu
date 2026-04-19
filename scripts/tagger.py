@@ -85,11 +85,14 @@ def build_title_prompt(clean_text: str) -> tuple[str, str]:
     user_prompt = USER_PROMPT_TITLE_TEMPLATE.format(content=clean_text)
     return SYSTEM_PROMPT_TITLE, user_prompt
 
-def parse_title_result(raw: str) -> str:
-    """从 Agent 返回中解析标题"""
+def parse_title_result(raw) -> str:
+    """从 Agent 返回中解析标题（支持 str 或 dict）"""
     try:
-        result = json.loads(raw)
+        if isinstance(raw, dict):
+            result = raw
+        else:
+            result = json.loads(raw)
         title = result.get("title", "").strip()
         return title[:50] if title else ""
-    except (json.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, AttributeError, TypeError):
         return ""

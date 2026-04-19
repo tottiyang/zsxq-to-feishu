@@ -17,27 +17,33 @@ filter.py — 话题过滤器
 """
 
 import re, html, urllib.parse
-from typing import Optional
 from datetime import datetime
+from typing import Optional
 
 WEB_TAG_RE = re.compile(r'<e\s+type="web"\s+href="([^"]+)"', re.IGNORECASE)
 
 
 def extract_feishu_links(text: str) -> list[str]:
     """
-    从 talk.text HTML 中提取飞书链接（已解码）
-    <e type="web" href="https://feishu.cn/docx/xxx"> → 解码提取 URL
+    从 talk.text HTML 中提取飞书链接（完全解码）
+
+    ZSXQ API 返回 URL-encoded href，如：
+    https%3A%2F%2Fmy.feishu.cn%2Fwiki%2FTOKEN%3Ffrom%3Dfrom_copylink
+    需要 urllib.parse.unquote + html.unescape 双解码
     """
     if not text:
         return []
     decoded = []
     for h in WEB_TAG_RE.findall(text):
         try:
-            d = html.unescape(h)
-            d = urllib.parse.unquote(d)
+            d = urllib.parse.unquote(h)
+            d = html.unescape(d)
             decoded.append(d)
         except Exception:
-            decoded.append(h)
+            try:
+                decoded.append(urllib.parse.unquote(h))
+            except Exception:
+                decoded.append(h)
     return [u for u in decoded if 'feishu.cn' in u or 'larksuite' in u]
 
 
@@ -78,7 +84,7 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
     else:
         return None
 
-    # 提取飞书链接
+    # 提取飞书链接（完全解码）
     feishu_url = ""
     web_links = extract_feishu_links(text)
     if web_links:
@@ -117,6 +123,6 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
         "tags_str": "",
         "tag_notes": "{}",
         # 内部标记
-        "has_feishu_link": bool(feishu_url),        # 是否需要生成标签
-        "clean_text": clean_text[:3000],           # 净化正文
+        "has_feishu_link": bool(feishu_url),      # 是否需要生成标签
+        "clean_text": clean_text[:3000],          # 净化正文
     }

@@ -35,23 +35,29 @@ def _api_headers(extra: dict = None) -> dict:
 
 # ─────────── Token 验证 ───────────
 
-def validate_token() -> bool:
-    """验证 ZSXQ Token 是否有效（拉取1条 topics 验证）"""
-    topics = fetch_page(GROUP_ID, "digests", count=1)
-    if not topics:
-        print("Token 验证失败：无数据返回")
-        return False
-    t = topics[0]
-    print(f"Token 验证成功 ✓ 示例话题: {t.get('title','')[:40]}")
-    return True
+def validate_token(max_retries: int = 3, backoff: float = 3.0) -> bool:
+    """验证 ZSXQ Token 是否有效（拉取1条 topics 验证，含自动重试）"""
+    for attempt in range(max_retries):
+        topics = fetch_page(GROUP_ID, "digests", count=1)
+        if topics:
+            t = topics[0]
+            print(f"Token 验证成功 ✓ 示例话题: {t.get('title','')[:40]}")
+            return True
+        if attempt < max_retries - 1:
+            wait = backoff * (2 ** attempt)
+            print(f"  API 返回空（可能限流），{wait:.0f}s后重试...")
+            time.sleep(wait)
+    print("Token 验证失败：无数据返回（已重试{}次）".format(max_retries))
+    return False
 
 
 # ─────────── 单页获取 ───────────
 
 def fetch_page(group_id: str, scope: str, count: int = 20,
-               end_time: str = None, begin_time: str = None) -> list:
+               end_time: str = None, begin_time: str = None,
+               max_retries: int = 3, backoff: float = 3.0) -> list:
     """
-    获取单页 topics
+    获取单页 topics（含自动重试）
     Returns:
         list: topics 列表（每条含 topic_id/type/create_time/user/talk 等）
     """
@@ -61,24 +67,31 @@ def fetch_page(group_id: str, scope: str, count: int = 20,
     if begin_time:
         params += f"&begin_time={begin_time}"
 
-    conn = http.client.HTTPSConnection("api.zsxq.com", context=_ctx, timeout=15)
-    try:
-        conn.request("GET", f"/v2/groups/{group_id}/topics?{params}",
-                     headers=_api_headers())
-        resp = conn.getresponse()
-        body = resp.read()
-        d = json.loads(body)
-        if not d.get("succeeded"):
-            err = d.get("error", "?")
-            print(f"API 错误: {err}")
+    for attempt in range(max_retries):
+        conn = http.client.HTTPSConnection("api.zsxq.com", context=_ctx, timeout=15)
+        try:
+            conn.request("GET", f"/v2/groups/{group_id}/topics?{params}",
+                         headers=_api_headers())
+            resp = conn.getresponse()
+            body = resp.read()
+            d = json.loads(body)
+            if not d.get("succeeded"):
+                err = d.get("error", "?")
+                if err == "内部错误" and attempt < max_retries - 1:
+                    wait = backoff * (2 ** attempt)
+                    print(f"  ⚠️ API 内部错误，{wait:.0f}s后重试...")
+                    time.sleep(wait)
+                    continue
+                print(f"API 错误: {err}")
+                return []
+            rd = d.get("resp_data", {})
+            return rd.get("topics", []) if isinstance(rd, dict) else []
+        except Exception as e:
+            print(f"fetch_page 异常: {e}")
             return []
-        rd = d.get("resp_data", {})
-        return rd.get("topics", []) if isinstance(rd, dict) else []
-    except Exception as e:
-        print(f"fetch_page 异常: {e}")
-        return []
-    finally:
-        conn.close()
+        finally:
+            conn.close()
+    return []
 
 
 # ─────────── 迭代翻页 ───────────

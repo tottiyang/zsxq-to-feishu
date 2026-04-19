@@ -1,3 +1,4 @@
+from typing import Optional, List, Callable
 """
 engine.py — ZSXQ话题拉取系统主流程
 
@@ -46,7 +47,7 @@ def _sleep(msg: str = ""):
 
 # ─────────── 单条话题完整处理 ───────────
 
-def process_topic(topic: dict, share_map: dict, state: SyncState) -> dict | None:
+def process_topic(topic: dict, share_map: dict, state: SyncState) -> Optional[dict]:
     """
     对单条 topic 执行：过滤 → 标题生成 → 标签生成（仅飞书链接）
     返回入库数据 dict，或 None（跳过）
@@ -251,25 +252,42 @@ def run_verify():
     assert validate_token(), "❌ Token 验证失败"
     print("✅ ZSXQ Token 正常")
 
-    # ② 拉取1条真实话题
-    print("\n② 拉取真实话题...")
-    topics = fetch_page(GROUP_ID, "digests", 1)
-    assert topics, "❌ 无法拉取 topics"
-    topic = topics[0]
+    # ② 找一个有飞书链接的话题
+    print("\n② 寻找有链接的话题...")
+    topic = None
+    share_map = {}
+    from filter import extract_feishu_links
+    for _ in range(5):  # 最多5批×20条=100条
+        extra = fetch_page(GROUP_ID, "digests", 20)
+        if not extra:
+            break
+        for t in extra:
+            talk_text = ""
+            if t.get("type") == "talk":
+                talk_text = (t.get("talk") or {}).get("text", "") or ""
+            elif t.get("type") == "question":
+                talk_text = (t.get("question") or {}).get("text", "") or ""
+            links = extract_feishu_links(talk_text)
+            if links:
+                topic = t
+                share_map = fetch_share_urls([topic])
+                print(f"  找到: topic_id={t['topic_id']}, feishu_links={len(links)}个")
+                break
+        if topic:
+            break
+    assert topic, "❌ 100条内无有链接话题，终止"
     tid = topic["topic_id"]
-    print(f"✅ 拉取成功: topic_id={tid}, title={topic.get('title','')[:40]}")
 
     # ③ 分享链接
     print("\n③ 获取分享链接...")
-    share_map = fetch_share_urls([topic])
     share_url = share_map.get(str(tid), "")
     print(f"   分享链接: {share_url or '(空)'}")
     if share_url:
         print("✅ 分享链接获取成功")
     else:
-        print("⚠️ 分享链接为空（话题可能已被删除）")
+        print("⚠️ 分享链接为空（话题可能已被删除，可接受）")
 
-    # ④ 过滤 + 入库字段
+    # ④ extract_topic_data
     print("\n④ 验证 extract_topic_data...")
     data = extract_topic_data(topic, share_map)
     assert data, "❌ extract_topic_data 返回空"
@@ -277,10 +295,14 @@ def run_verify():
     print(f"   article_url: {data.get('article_url','')[:60] or '(空)'}")
     print(f"   author: {data.get('author','')}")
     print(f"   has_feishu_link: {data.get('has_feishu_link')}")
-    print("✅ 过滤逻辑正常")
+    print(f"   create_time_str: {data.get('create_time_str','')}")
+    print("✅ 过滤逻辑正常（8字段+标签占位）")
 
-    # ⑤ 飞书文档标题（有链接才测试）
+    # ⑤ 飞书文档标题
     doc_title = None
+    generated = ""
+    tags_str = ""
+    tag_notes = "{}"
     if data.get("feishu_url"):
         print("\n⑤ 验证飞书文档标题获取...")
         try:
@@ -288,37 +310,56 @@ def run_verify():
             if doc_title:
                 print(f"✅ 文档标题: {doc_title[:50]}")
             else:
-                print("⚠️ 文档标题为空")
+                print("⚠️ 文档标题为空（话题内链接可能是其他类型）")
         except Exception as e:
             print(f"⚠️ 文档标题获取失败: {e}")
 
-    # ⑥ 标签生成（有链接才测试）
-    if data.get("has_feishu_link") and data.get("feishu_url"):
-        print("\n⑥ 验证标签生成...")
+    # ⑥ 标题生成（fallback）
+    if not doc_title and data.get("clean_text"):
+        print("\n⑥ 验证 Agent 标题生成（无文档标题时）...")
+        try:
+            sys_p, usr_p = build_title_prompt(data["clean_text"])
+            result = agent_llm_infer(sys_p, usr_p)
+            # agent_llm_infer 返回 dict: {"title": "..."} 或 MiniMax 直接返回的格式
+            if isinstance(result, dict):
+                generated = result.get("title", "").strip()
+            else:
+                generated = parse_title_result(result)
+            if generated:
+                print(f"✅ 标题生成成功: {generated[:40]}")
+            else:
+                print("⚠️ 标题生成为空")
+        except Exception as e:
+            print(f"⚠️ 标题生成失败: {e}")
+
+    # ⑦ 标签生成（仅飞书链接）
+    if data.get("has_feishu_link") and data.get("feishu_url") and doc_title:
+        print("\n⑦ 验证标签生成...")
         try:
             content = fetch_doc_content(data["feishu_url"])
             if content:
-                sys_p, usr_p = build_tag_prompt(doc_title or data.get("title","无标题"), content)
+                sys_p, usr_p = build_tag_prompt(doc_title, content)
                 tags_result = agent_llm_infer(sys_p, usr_p)
                 tags_str, tag_notes = tags_to_row(tags_result)
                 print(f"✅ 标签: {tags_str or '(空)'}")
+                print(f"   标签说明: {tag_notes[:80]}")
             else:
-                print("⚠️ 文档内容为空，跳过标签测试")
+                print("⚠️ 文档内容为空，跳过标签")
         except Exception as e:
             print(f"⚠️ 标签生成失败: {e}")
 
-    # ⑦ 表格写入
-    print("\n⑦ 验证飞书表格写入...")
+    # ⑧ 表格写入
+    print("\n⑧ 验证飞书表格写入...")
     test_connection()
-
-    # 模拟写入
     test_data = dict(data)
-    test_data["title"] = doc_title or data.get("title") or f"验证标题_{tid[-6:]}"
+    test_data["title"] = doc_title or generated or f"验证标题_{str(tid)[-6:]}"
     row = row_to_values(test_data)
+    assert len(row) == 10, f"❌ 列数错误: {len(row)}，应为10"
     last = get_last_row()
     result = batch_write_rows([row], start_row=last + 1)
     assert result.get("code") == 0, f"❌ 写入失败: {result}"
-    print(f"✅ 模拟写入成功: row={last+1}, updatedCells={result.get('data',{}).get('updatedCells')}")
+    cells = result.get("data", {}).get("updatedCells", 0)
+    print(f"✅ 模拟写入成功: row={last+1}, 列数={len(row)}, updatedCells={cells}")
 
     print("\n" + "=" * 60)
     print("🎉 全链路验证通过！")
@@ -357,14 +398,14 @@ def agent_llm_infer(system_prompt: str, user_prompt: str) -> dict:
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read())
         raw = data["choices"][0]["message"].get("content", "")
+        # raw 可能是 dict（已解析）或 str（原始文本）
+        if isinstance(raw, dict):
+            return raw
+        raw_str = raw
 
     # 去掉 思考标签和 markdown
-    text = re.sub(r"<begin_thinking>.*?</end_thinking>", "", raw, flags=re.DOTALL)
-    parts = text.split("
-</think>
-
-")
-    json_text = parts[-1].strip() if len(parts) > 1 else text.strip()
+    text = re.sub(r"<begin_thinking>.*?</end_thinking>", "", raw_str, flags=re.DOTALL)
+    json_text = text.strip()
     json_text = re.sub(r"```(?:json)?\s*", "", json_text).strip()
 
     # 提取 {"title":...} 块（最后一个，即真实答案）
