@@ -121,3 +121,5 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
         "clean_text": clean_text,                           # 净化正文（供 summary 用）
         "needs_tags": bool(feishu_url),
     }
+
+# 兼容旧数据：I/J 列为空
