@@ -4,22 +4,16 @@ filter.py — 话题过滤器
 功能：
 1. extract_feishu_links()  — 从 talk.text HTML 中提取飞书链接
 2. parse_time_str()        — ISO时间字符串 → 'YYYY-MM-DD HH:MM' 格式
-3. extract_topic_data()   — 从单条 topic 提取入库字段
+3. extract_topic_data()   — 从单条 topic 提取入库字段（含标签占位）
 
 入库条件（二选一）：
-- 有飞书链接（<e type="web" href="feishu.cn...">）→ 入库
-- 有 talk.article.article_url                               → 入库
-- 两者都没有                                               → 跳过（不入库）
+- 有飞书链接（<e type="web" href="feishu.cn...">）→ 入库，标签由 engine.py 生成
+- 有 talk.article.article_url                             → 入库，无标签
+- 两者都没有                                             → 跳过（不入库）
 
-标题生成逻辑：
-- 有飞书链接 → 飞书文档标题（engine.py 调用 extract_doc_title）
-- 无飞书链接但有 article_url → 总结正文/文章内容生成标题（Agent 大模型）
-- 两者都没有 → 不入库
-
-分享链接获取方式：
-- 由 zsxq_api.fetch_share_urls_for_topics() 批量获取
-- 返回结构：{topic_id: share_url}
-- engine.py 中先拉 topics，再批量获取分享链接，再传给本模块
+标签生成范围（需求规范）：
+- 仅"有飞书链接"的话题需要生成标签
+- engine.py 在入库前调用 fetch_doc_content + Agent LLM 生成标签
 """
 
 import re, html, urllib.parse
@@ -30,7 +24,10 @@ WEB_TAG_RE = re.compile(r'<e\s+type="web"\s+href="([^"]+)"', re.IGNORECASE)
 
 
 def extract_feishu_links(text: str) -> list[str]:
-    """从 talk.text HTML 中提取飞书链接（已解码）"""
+    """
+    从 talk.text HTML 中提取飞书链接（已解码）
+    <e type="web" href="https://feishu.cn/docx/xxx"> → 解码提取 URL
+    """
     if not text:
         return []
     decoded = []
@@ -48,8 +45,11 @@ def parse_time_str(iso_time: str) -> str:
     """ISO 时间字符串 → 'YYYY-MM-DD HH:MM' 格式"""
     if not iso_time:
         return ""
-    dt = datetime.fromisoformat(iso_time.replace('+0800', '+08:00'))
-    return dt.strftime("%Y-%m-%d %H:%M")
+    try:
+        dt = datetime.fromisoformat(iso_time.replace('+0800', '+08:00'))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return iso_time[:16].replace('T', ' ')
 
 
 def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
@@ -58,14 +58,10 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
 
     Args:
         topic: ZSXQ Topics API 返回的单条记录
-        share_map: {topic_id: share_url}，由 zsxq_api.fetch_share_urls_for_topics() 生成
+        share_map: {topic_id: share_url}，由 zsxq_api.fetch_share_urls() 生成
 
     Returns:
         dict: 入库字段 | None: 无外链，跳过
-
-    标题逻辑（needs_title_from_feishu 标记）:
-        有飞书链接 → title=zsxq原始标题（待 engine.py 调用飞书API后替换）
-        无飞书链接 → title=zsxq原始标题（直接入库）
     """
     topic_type = topic.get("type", "talk")
 
@@ -93,7 +89,7 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
     if article and isinstance(article, dict):
         article_url = article.get("article_url", "") or ""
 
-    # 入库条件判断
+    # 入库条件判断（二选一）
     if not feishu_url and not article_url:
         return None
 
@@ -103,23 +99,24 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
     if share_map:
         share_url = share_map.get(tid, "")
 
-    # 净化正文（供标题 summary 用，strip HTML tag）
-    clean_text = re.sub(r'<[^>]+>', '', text).strip()[:3000]
+    # 净化正文（供标题/标签 summary 用，strip HTML tag）
+    clean_text = re.sub(r'<[^>]+>', ' ', text).strip()
+    clean_text = re.sub(r'\s+', ' ', clean_text)
 
     return {
         "feishu_url": feishu_url,
         "article_url": article_url,
         "topic_id": tid,
-        "title": "",                              # 标题由 engine.py 填充（飞书文档/正文summary）
+        "title": "",                               # 标题由 engine.py 填充
         "author": author,
         "create_time": topic.get("create_time", "") or "",
         "create_time_str": parse_time_str(topic.get("create_time", "")),
         "share_url": share_url,
         "is_digest": "是" if topic.get("digested") else "否",
-        "needs_title_from_feishu": bool(feishu_url),       # 有飞书链接 → 标题取自文档
-        "needs_title_summary": bool(article_url) and not bool(feishu_url),  # 有文章无飞书 → 总结正文
-        "clean_text": clean_text,                           # 净化正文（供 summary 用）
-        "needs_tags": bool(feishu_url),
+        # 标签：仅飞书链接话题由 engine.py 填充
+        "tags_str": "",
+        "tag_notes": "{}",
+        # 内部标记
+        "has_feishu_link": bool(feishu_url),        # 是否需要生成标签
+        "clean_text": clean_text[:3000],           # 净化正文
     }
-
-# 兼容旧数据：I/J 列为空

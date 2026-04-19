@@ -1,92 +1,59 @@
 """
-zsxq_api.py — ZSXQ Topics API 客户端
+zsxq_api.py — ZSXQ Topics API 客户端（已验证 ✅ 2026-04-19）
 
 核心功能：
-1. validate_token() — 验证 Chrome 登录态
-2. fetch_page()    — 获取单页 topics（含提取分享链接）
-3. iter_topics()  — 迭代获取全部 topics（自动翻页，间隔随机 3~6 秒）
+1. validate_token()     — 验证 ZSXQ Token 是否有效
+2. fetch_page()        — 获取单页 topics
+3. iter_topics()       — 迭代翻页获取全部 topics（随机 3~6 秒间隔）
+4. fetch_share_urls()  — 批量获取分享链接（逐条限速 1~2 秒）
 
 技术方案：
-- Playwright 连接 Chrome Remote Debugging（端口28800）
-- XMLHttpRequest withCredentials=true 携带完整 cookie session
-- 分享链接：通过 topic 详情 API（/v2/topics/{topic_id}）异步并发拉取
-
-分享链接获取方案（已实测）：
-- ZSXQ Topics API 无原生 share_url 字段
-- topic 详情 API（/v2/topics/{topic_id}）同样无 share_url 字段
-- 分享链接格式：https://t.zsxq.com/{6位短码}，需通过话题详情页提取
-- 方案：fetch_page 返回 topics 后，并发异步拉取每个 topic 的详情页，
-  从页面 DOM 中提取分享链接（通过 share 按钮触发）
+- 直接 HTTP 请求（urllib）带 Cookie，不依赖 Chrome CDP 翻页
+  Header: Cookie: zsxq_access_token=<TOKEN>
+- 分享链接：同样直接 HTTP GET，带 Cookie
+  GET https://api.zsxq.com/v2/topics/{topic_id}/share_url
+  成功: {"succeeded":true,"resp_data":{"share_url":"https://t.zsxq.com/xxx"}}
+  失败: {"succeeded":false,"error":"主题不存在或已被删除"}
 """
 
-import subprocess, json, time, random, re, asyncio
+import http.client, json, ssl, time, random
+from config import GROUP_ID, ZSXQ_TOKEN, CHROME_DEBUG_PORT, TOPICS_FETCH_INTERVAL, SHARE_URL_INTERVAL
 
-PLAYWRIGHT_MODULE = "/Users/totti/.npm/_npx/705bc6b22212b352/node_modules/playwright"
+_ctx = ssl.create_default_context()
 
-
-def _run_xhr_sync(group_id: str, params: str) -> dict:
-    """同步 XHR 获取 topics（避免 async 回调乱序）"""
-    js = rf"""
-const {{chromium}} = require('{PLAYWRIGHT_MODULE}');
-(async () => {{
-    const browser = await chromium.connectOverCDP('http://localhost:28800');
-    const ctx = browser.contexts()[0];
-    const page = await ctx.newPage();
-    await page.goto('https://wx.zsxq.com/group/{group_id}', {{
-        waitUntil: 'domcontentloaded', timeout: 20000
-    }});
-    await page.waitForTimeout(2000);
-    
-    // 同步 XHR（false=同步模式，避免回调乱序）
-    const result = await page.evaluate(() => {{
-        return new Promise((resolve) => {{
-            const xhr = new XMLHttpRequest();
-            xhr.open('GET', 'https://api.zsxq.com/v2/groups/{group_id}/topics?' + '{params}', false);
-            xhr.withCredentials = true;
-            xhr.setRequestHeader('Accept', 'application/json');
-            xhr.onload = () => {{
-                try {{ resolve(JSON.parse(xhr.responseText).resp_data?.topics || []); }}
-                catch(e) {{ resolve([]); }}
-            }};
-            xhr.onerror = () => resolve([]);
-            xhr.send();
-        }});
-    }});
-    
-    console.log('ZSXQ_DATA:' + JSON.stringify(result));
-    await browser.close();
-}})().catch(e => {{ console.error('ERROR:'+e.message); process.exit(1); }});
-"""
-    result = subprocess.run(
-        ['node', '-e', js],
-        capture_output=True, text=True, timeout=60
-    )
-    if result.returncode != 0:
-        return {"error": f"exec error: {result.stderr}", "topics": []}
-    try:
-        raw = result.stdout.split('ZSXQ_DATA:')[1]
-        return {"topics": json.loads(raw), "error": None}
-    except (IndexError, json.JSONDecodeError):
-        return {"error": f"parse error", "topics": []}
+def _api_headers(extra: dict = None) -> dict:
+    h = {
+        "Cookie": f"zsxq_access_token={ZSXQ_TOKEN}",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://wx.zsxq.com/",
+    }
+    if extra:
+        h.update(extra)
+    return h
 
 
+# ─────────── Token 验证 ───────────
 
 def validate_token() -> bool:
-    """验证 Chrome 登录态（获取1条 topics 验证）"""
-    data = _run_xhr_sync("15552545485212", "scope=digests&count=1")
-    if data.get("error") or not data.get("topics"):
-        print(f"Token 验证失败: {data.get('error', '无数据')}")
+    """验证 ZSXQ Token 是否有效（拉取1条 topics 验证）"""
+    topics = fetch_page(GROUP_ID, "digests", count=1)
+    if not topics:
+        print("Token 验证失败：无数据返回")
         return False
-    print(f"Token 验证成功 ✓（示例话题: {data['topics'][0].get('title','')[:30]}）")
+    t = topics[0]
+    print(f"Token 验证成功 ✓ 示例话题: {t.get('title','')[:40]}")
     return True
 
+
+# ─────────── 单页获取 ───────────
 
 def fetch_page(group_id: str, scope: str, count: int = 20,
                end_time: str = None, begin_time: str = None) -> list:
     """
     获取单页 topics
     Returns:
-        list: topics 列表
+        list: topics 列表（每条含 topic_id/type/create_time/user/talk 等）
     """
     params = f"scope={scope}&count={count}"
     if end_time:
@@ -94,153 +61,134 @@ def fetch_page(group_id: str, scope: str, count: int = 20,
     if begin_time:
         params += f"&begin_time={begin_time}"
 
-    data = _run_xhr_sync(group_id, params)
-    if data.get("error"):
-        print(f"API error: {data['error']}")
+    conn = http.client.HTTPSConnection("api.zsxq.com", context=_ctx, timeout=15)
+    try:
+        conn.request("GET", f"/v2/groups/{group_id}/topics?{params}",
+                     headers=_api_headers())
+        resp = conn.getresponse()
+        body = resp.read()
+        d = json.loads(body)
+        if not d.get("succeeded"):
+            err = d.get("error", "?")
+            print(f"API 错误: {err}")
+            return []
+        rd = d.get("resp_data", {})
+        return rd.get("topics", []) if isinstance(rd, dict) else []
+    except Exception as e:
+        print(f"fetch_page 异常: {e}")
         return []
-    return data["topics"]
+    finally:
+        conn.close()
 
+
+# ─────────── 迭代翻页 ───────────
 
 def iter_topics(group_id: str, scope: str,
                 end_time: str = None, stop_time: str = None,
-                begin_time: str = None) -> list:
+                begin_time: str = None,
+                max_pages: int = None) -> list:
     """
-    迭代获取所有 topics（自动翻页，间隔随机 3~6 秒）
+    迭代翻页获取全部 topics（随机 3~6 秒间隔，避免触发限流）
+    达到 stop_time 时停止（不包含 stop_time 时刻的数据）
+
+    Args:
+        group_id: 星球ID
+        scope: "digests"（精华）或 "all"（全部）
+        end_time: 本次翻页起点时间（ISO格式）
+        stop_time: 停止时间（不含，iter_topics 不再请求）
+        begin_time: 只获取此时间之后的数据（用于排除已处理数据）
+        max_pages: 最多翻页次数（用于测试）
+
     Returns:
-        list: 所有符合条件的 topics
+        list: 所有符合条件的 topics（从新到旧）
     """
     all_topics = []
     current_end = end_time
     page_num = 0
 
     while True:
+        page_num += 1
         topics = fetch_page(group_id, scope, 20, current_end, begin_time)
+
         if not topics:
+            print(f"  ↘ 翻页 {page_num} 无数据，退出")
             break
+
+        first_time = topics[0].get("create_time", "")
+        last_time = topics[-1].get("create_time", "")
 
         for t in topics:
             create_time = t.get("create_time", "")
             if stop_time and create_time < stop_time:
-                print(f"  ↘ 到达停止时间 {stop_time}，退出")
+                print(f"  ↘ 到达停止时间 {stop_time}，退出（last={create_time}）")
                 return all_topics
-            if begin_time and create_time >= begin_time:
-                continue
             all_topics.append(t)
 
+        print(f"  翻页 {page_num:3d}，累计 {len(all_topics):5d} 条，"
+              f"本页: {last_time[:19]} ~ {first_time[:19]}")
+
         current_end = topics[-1].get("create_time")
-        page_num += 1
-        print(f"  翻页 {page_num:3d}，累计 {len(all_topics):4d} 条，"
-              f"本页: {topics[-1].get('create_time','')[:19]} ~ {topics[0].get('create_time','')[:19]}")
-        time.sleep(random.uniform(3, 6))
+        interval = random.uniform(*TOPICS_FETCH_INTERVAL)
+        time.sleep(interval)
+
+        if max_pages and page_num >= max_pages:
+            print(f"  ↘ 达到最大翻页数 {max_pages}，退出")
+            break
 
     print(f"  ✓ 完成，共 {len(all_topics)} 条")
     return all_topics
 
 
-def fetch_share_urls_for_topics(topics: list, group_id: str) -> dict:
+# ─────────── 分享链接获取 ───────────
+
+def fetch_share_url(topic_id: str) -> str:
     """
-    为话题列表批量获取分享链接（asyncio 并发）
+    获取单个话题的分享链接
+    GET https://api.zsxq.com/v2/topics/{topic_id}/share_url
+
+    Returns:
+        str: 分享链接 或 空字符串（失败/不存在）
+    """
+    conn = http.client.HTTPSConnection("api.zsxq.com", context=_ctx, timeout=10)
+    try:
+        conn.request("GET", f"/v2/topics/{topic_id}/share_url",
+                     headers=_api_headers())
+        resp = conn.getresponse()
+        body = resp.read()
+        d = json.loads(body)
+        if d.get("succeeded"):
+            return d.get("resp_data", {}).get("share_url", "")
+        return ""
+    except Exception:
+        return ""
+    finally:
+        conn.close()
+
+
+def fetch_share_urls(topics: list, on_progress: callable = None) -> dict:
+    """
+    批量获取分享链接（逐条限速 1~2 秒，避免 API 过载）
 
     Args:
         topics: topics 列表
-        group_id: 星球ID
+        on_progress: 进度回调 fn(current, total, topic_id, url)
 
     Returns:
-        dict: {topic_id: share_url}
+        dict: {topic_id: share_url}，获取失败的 value 为空字符串
     """
-    topic_ids = [str(t["topic_id"]) for t in topics]
-    return asyncio.run(_fetch_share_urls_async(topic_ids, group_id))
+    result = {}
+    total = len(topics)
 
+    for i, topic in enumerate(topics):
+        tid = str(topic["topic_id"])
+        url = fetch_share_url(tid)
+        result[tid] = url
+        if on_progress:
+            on_progress(i + 1, total, tid, url)
+        # 限速：避免触发 API 429
+        if i < total - 1:
+            time.sleep(random.uniform(*SHARE_URL_INTERVAL))
 
-async def _fetch_share_url_async(topic_id: str, group_id: str) -> tuple[str, str]:
-    """异步获取单个话题的分享链接
-
-    技术方案：
-    1. Playwright page.route() 拦截 GET /topics/{id}/share_url API
-    2. 导航到话题详情页（此时 share URL API 尚未调用）
-    3. 模拟点击 .talk-content-container 内的 .p.ellipsis 按钮
-    4. 拦截 API 响应，提取 share_url 字段
-    """
-    js = f"""
-const {{chromium}} = require('{PLAYWRIGHT_MODULE}');
-(async () => {{
-    const browser = await chromium.connectOverCDP('http://localhost:28800');
-    const ctx = browser.contexts()[0];
-    const page = await ctx.newPage();
-
-    let captured = '';
-    const topicId = '{topic_id}';
-
-    // 拦截 share_url API
-    await page.route(\`**/api.zsxq.com/v2/topics/{{topicId}}/share_url**\`, async (route) => {{
-        try {{
-            const resp = await route.fetch();
-            const json = await resp.json();
-            captured = json?.resp_data?.share_url || '';
-        }} catch(e) {{}}
-        await route.continue();
-    }});
-
-    await page.goto('https://wx.zsxq.com/topics/' + topicId + '?group_id={group_id}', {{
-        waitUntil: 'domcontentloaded', timeout: 15000
-    }});
-    await page.waitForTimeout(1500);
-
-    // 点击三个点按钮
-    try {{
-        const ellipsis = await page.locator('.p.ellipsis').first();
-        if (await ellipsis.isVisible()) {{
-            await ellipsis.click();
-            await page.waitForTimeout(2000);
-        }}
-    }} catch(e) {{}}
-
-    console.log('SHARE_URL:' + captured);
-    await browser.close();
-}})().catch(e => {{ console.error('ERROR:'+e.message); process.exit(1); }});
-"""
-    proc = await asyncio.create_subprocess_exec(
-        'node', '-e', js,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    out = stdout.decode()
-    if 'SHARE_URL:' in out:
-        url = out.split('SHARE_URL:')[1].strip()
-        return topic_id, url
-    return topic_id, ""
-
-
-async def _fetch_share_urls_async(topic_ids: list, group_id: str, max_concurrency: int = 5) -> dict:
-    """asyncio 并发拉取分享链接（信号量控制并发数）"""
-    sem = asyncio.Semaphore(max_concurrency)
-    results = {}
-
-    async def _fetch_one(tid: str):
-        async with sem:
-            tid, url = await _fetch_share_url_async(tid, group_id)
-            results[tid] = url
-
-    await asyncio.gather(*[_fetch_one(tid) for tid in topic_ids])
-    return results
-
-
-def fetch_share_urls_for_topics(topics: list, group_id: str) -> dict:
-    """
-    为话题列表批量获取分享链接（asyncio 并发）
-
-    技术方案：
-    - Playwright page.route() 拦截 GET /topics/{id}/share_url API
-    - 导航到话题详情页后，模拟点击 .talk-content-container 内的 .p.ellipsis 按钮
-    - 拦截 API 响应，提取 share_url 字段
-
-    Args:
-        topics: topics 列表
-        group_id: 星球ID
-
-    Returns:
-        dict: {topic_id: share_url}
-    """
-    topic_ids = [str(t["topic_id"]) for t in topics]
-    return asyncio.run(_fetch_share_urls_async(topic_ids, group_id))
+    success = sum(1 for v in result.values() if v)
+    print(f"  分享链接获取完成：{success}/{total} 条有效链接")
+    return result
