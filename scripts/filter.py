@@ -3,13 +3,18 @@ filter.py — 话题过滤器
 
 功能：
 1. extract_feishu_links()  — 从 talk.text HTML 中提取飞书链接
-2. parse_time_ms()         — ISO时间字符串 → 毫秒时间戳
+2. parse_time_str()        — ISO时间字符串 → 'YYYY-MM-DD HH:MM' 格式
 3. extract_topic_data()   — 从单条 topic 提取入库字段
 
 入库条件（二选一）：
 - 有飞书链接（<e type="web" href="feishu.cn...">）→ 入库
 - 有 talk.article.article_url                               → 入库
 - 两者都没有                                               → 跳过（不入库）
+
+标题生成逻辑：
+- 有飞书链接 → 飞书文档标题（engine.py 调用 extract_doc_title）
+- 无飞书链接但有 article_url → 总结正文/文章内容生成标题（Agent 大模型）
+- 两者都没有 → 不入库
 
 分享链接获取方式：
 - 由 zsxq_api.fetch_share_urls_for_topics() 批量获取
@@ -92,25 +97,27 @@ def extract_topic_data(topic: dict, share_map: dict = None) -> Optional[dict]:
     if not feishu_url and not article_url:
         return None
 
-    # 净化标题
-    clean_title = re.sub(r'<[^>]+>', '', topic.get("title") or "").strip()[:200]
-
     # 获取分享链接
     tid = str(topic["topic_id"])
     share_url = ""
     if share_map:
         share_url = share_map.get(tid, "")
 
+    # 净化正文（供标题 summary 用，strip HTML tag）
+    clean_text = re.sub(r'<[^>]+>', '', text).strip()[:3000]
+
     return {
         "feishu_url": feishu_url,
         "article_url": article_url,
         "topic_id": tid,
-        "title": clean_title,
+        "title": "",                              # 标题由 engine.py 填充（飞书文档/正文summary）
         "author": author,
         "create_time": topic.get("create_time", "") or "",
         "create_time_str": parse_time_str(topic.get("create_time", "")),
         "share_url": share_url,
         "is_digest": "是" if topic.get("digested") else "否",
-        "needs_title_from_feishu": bool(feishu_url),   # 有飞书链接 → 标题取自文档
+        "needs_title_from_feishu": bool(feishu_url),       # 有飞书链接 → 标题取自文档
+        "needs_title_summary": bool(article_url) and not bool(feishu_url),  # 有文章无飞书 → 总结正文
+        "clean_text": clean_text,                           # 净化正文（供 summary 用）
         "needs_tags": bool(feishu_url),
     }
