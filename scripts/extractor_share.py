@@ -33,7 +33,7 @@ const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_mod
 (async () => {{
     const browser = await chromium.connectOverCDP('http://localhost:28800');
     const ctx = browser.contexts()[0];
-    const page = ctx.pages()[0];
+    const page = await ctx.newPage();
 
     // 注入拦截器：捕获 api.zsxq.com 的 share_url 响应
     let shareResult = null;
@@ -107,7 +107,7 @@ const {{ chromium }} = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_mod
 (async () => {{
     const browser = await chromium.connectOverCDP('http://localhost:28800');
     const ctx = browser.contexts()[0];
-    const page = ctx.pages()[0];
+    const page = await ctx.newPage();
 
     // 注入 share_url 拦截器
     let shareResult = null;

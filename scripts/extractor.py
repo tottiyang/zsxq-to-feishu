@@ -45,7 +45,7 @@ const { chromium } = require('/Users/totti/.npm/_npx/705bc6b22212b352/node_modul
 (async () => {
   const browser = await chromium.connectOverCDP('http://localhost:28800');
   const context = browser.contexts()[0];
-  const page = context.pages()[0];
+  const page = await context.newPage();
 
   try {
     await page.goto('%s', { waitUntil: 'networkidle', timeout: 20000 });
